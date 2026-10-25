@@ -6,7 +6,7 @@
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/+esm";
 import { SUPABASE_URL, SUPABASE_KEY } from "./config.js";
-import { levelProgress, streakFrom, badgesFor, standings, chaseLine, hm, clock, untilReset, ago, localDay, encodeLinkCode } from "./game.mjs";
+import { levelProgress, streakFrom, badgesFor, standings, chaseLine, hm, clock, untilReset, ago, localDay, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours } from "./game.mjs";
 
 const db = createClient(SUPABASE_URL, SUPABASE_KEY);
 const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/London";
@@ -19,6 +19,7 @@ const TAB_KEY = "lockedin.tab";
 // ?link and that browser shows the option. Nobody else sees it.
 const LINKING_KEY = "lockedin.linking";
 const SKIPPED_MODULES_KEY = "lockedin.skippedModules";
+const ACTIVITY_KEY = "lockedin.activityView";
 
 const state = {
   user: null, me: null, crews: [], people: [], live: null, feed: [], mine: [], keys: [], modules: [],
@@ -54,7 +55,10 @@ const inviteLink = (code) => `${location.origin}${location.pathname}?join=${code
 
 function toast(text, { bad = false, ms = 3800 } = {}) {
   const node = h("div", { class: `toast${bad ? " bad" : ""}` }, text);
-  document.getElementById("toasts").append(node);
+  const stack = document.getElementById("toasts");
+  // Two at a time: a burst of actions mustn't bury the screen.
+  while (stack.children.length >= 2) stack.firstChild.remove();
+  stack.append(node);
   setTimeout(() => node.remove(), ms);
 }
 function oops(error, fallback = "That didn't work. Try again?") {
@@ -283,7 +287,7 @@ async function refresh() {
     db.rpc("room_stats", { p_tz: TZ }),
     db.from("live").select("session_id, subject, started_at, location").eq("user_id", uid).maybeSingle(),
     db.from("sessions").select("id, user_id, subject, started_at, ended_at, location").order("ended_at", { ascending: false }).limit(25),
-    db.from("sessions").select("id, subject, started_at, ended_at, location").eq("user_id", uid).order("started_at", { ascending: false }).limit(40),
+    db.from("sessions").select("id, subject, started_at, ended_at, location").eq("user_id", uid).gte("started_at", new Date(Date.now() - 70 * 86400000).toISOString()).order("started_at", { ascending: false }).limit(400),
     db.from("link_keys").select("id, label, created_at, last_used_at").order("created_at"),
     db.rpc("my_subject_stats", { p_tz: TZ }),
     loadCrews(),
@@ -388,6 +392,9 @@ function subscribe() {
       refreshSoon();
     })
     .on("postgres_changes", { event: "*", schema: "public", table: "sessions" }, refreshSoon)
+    // New crewmates and renamed ones. Inserts and updates only: those are RLS-checked, deletes aren't.
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "crew_members" }, refreshSoon)
+    .on("postgres_changes", { event: "UPDATE", schema: "public", table: "profiles" }, refreshSoon)
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "pings", filter: `to_user=eq.${state.user.id}` }, ({ new: ping }) => {
       const who = byId(ping.from_user);
       notify(ping.kind === "joining" ? `🏃 ${who?.name || "Someone"} is on the way to join you!` : `🔥 ${who?.name || "Someone"} is cheering you on!`);
@@ -534,10 +541,11 @@ function liveCard(p) {
     toast(kind === "joining" ? `Told ${p.name} you're coming 🏃` : `Sent ${p.name} some fire 🔥`);
   };
   return h("article", { class: "card live-card" },
-    h("span", { class: "avatar is-live", "aria-hidden": "true" }, p.emoji),
-    h("div", { class: "live-who" },
-      h("strong", null, p.name), " ", h("span", { class: "live-clock", dataset: { since: p.live_started_at } }, clock(Date.now() - +new Date(p.live_started_at))),
-      h("p", null, p.live_subject, p.live_location ? ` · 📍 ${p.live_location}` : "")),
+    personButton(p, "live-person",
+      h("span", { class: "avatar is-live", "aria-hidden": "true" }, p.emoji),
+      h("div", { class: "live-who" },
+        h("strong", null, p.name), " ", h("span", { class: "live-clock", dataset: { since: p.live_started_at } }, clock(Date.now() - +new Date(p.live_started_at))),
+        h("p", null, p.live_subject, p.live_location ? ` · 📍 ${p.live_location}` : ""))),
     h("div", { class: "live-actions" },
       p.live_location ? h("button", { class: "btn btn-small btn-live", onclick: () => ping("joining") }, "🏃 I'm coming") : null,
       h("button", { class: "btn btn-small btn-soft", onclick: () => ping("cheer") }, "🔥 Hype")));
@@ -549,7 +557,7 @@ function boardView() {
   const chase = chaseLine(ranked, state.user.id, key);
   const leader = Math.max(1, ...ranked.map((p) => p[key]));
   const spot = (p, place) => p
-    ? h("div", { class: `podium-spot ${place}` }, h("span", { class: `avatar${p.live_started_at ? " is-live" : ""}` }, p.emoji), h("span", { class: "podium-name" }, p.name), h("span", { class: "podium-time" }, hm(p[key])),
+    ? personButton(p, `podium-spot ${place}`, h("span", { class: `avatar${p.live_started_at ? " is-live" : ""}` }, p.emoji), h("span", { class: "podium-name" }, p.name), h("span", { class: "podium-time" }, hm(p[key])),
       h("div", { class: "podium-block" }, place === "first" ? "1" : place === "second" ? "2" : "3"))
     : h("div", { class: `podium-spot ${place} empty-spot` }, h("span", { class: "avatar" }, "?"), h("span", { class: "podium-name" }, "—"), h("div", { class: "podium-block" }));
   const crewTotal = ranked.reduce((sum, p) => sum + p[key], 0);
@@ -561,47 +569,34 @@ function boardView() {
         h("span", { class: "reset" }, state.board === "week" ? `Resets in ${untilReset()}` : `${hm(crewTotal)} together`)),
       h("div", { class: "podium" }, spot(ranked[1], "second"), spot(ranked[0], "first"), spot(ranked[2], "third")),
       chase ? h("div", { class: "chase" }, h("span", { "aria-hidden": "true" }, "🎯"), h("span", null, chase)) : null,
-      h("ol", { class: "ranks" }, ranked.map((p) => h("li", { class: `rank-row${p.user_id === state.user.id ? " is-me" : ""}` },
+      h("ol", { class: "ranks" }, ranked.map((p) => h("li", null, personButton(p, `rank-row${p.user_id === state.user.id ? " is-me" : ""}`,
         h("span", { class: "rank-num" }, String(p.rank)),
         h("span", { class: `avatar${p.live_started_at ? " is-live" : ""}`, "aria-hidden": "true" }, p.emoji),
         h("div", { class: "rank-main" },
           h("strong", null, h("span", null, p.name), p.live_started_at ? h("i", { class: "live-dot", title: "Locked in now" }) : null, p.streak ? h("em", { class: "flame" }, `🔥${p.streak}`) : null),
           h("div", { class: "rank-bar" }, h("span", { style: { width: `${Math.max(3, (p[key] / leader) * 100)}%` } }))),
-        h("span", { class: "rank-time" }, hm(p[key])))))),
+        h("span", { class: "rank-time" }, hm(p[key]))))))),
     state.board === "week" ? h("p", { class: "small muted", style: { textAlign: "center", margin: "12px 0 0" } }, `Crew total this week: ${hm(crewTotal)}`) : null,
     h("section", { class: "section" },
       h("div", { class: "section-head" }, h("h2", null, "Recent sessions")),
       h("div", { class: "card" }, state.feed.length ? state.feed.map((s) => {
         const p = byId(s.user_id);
-        return h("div", { class: "feed-row" }, h("span", { class: "avatar", "aria-hidden": "true" }, p?.emoji || "📚"),
+        return (p ? (...kids) => personButton(p, "feed-row", ...kids) : (...kids) => h("div", { class: "feed-row" }, ...kids))(h("span", { class: "avatar", "aria-hidden": "true" }, p?.emoji || "📚"),
           h("div", null, h("p", null, `${p?.name || "Someone"} · ${s.subject}`), h("small", null, [s.location ? `📍 ${s.location}` : null, ago(s.ended_at)].filter(Boolean).join(" · "))),
           h("span", { class: "feed-time" }, hm(minutesBetween(s.started_at, s.ended_at))));
       }) : h("p", { class: "empty" }, "Finished sessions show up here."))),
   ];
 }
 
+const EMPTY_STATS = { total_minutes: 0, week_minutes: 0, today_minutes: 0, longest_minutes: 0, session_count: 0, early_sessions: 0, late_sessions: 0, days: {} };
+
 function meView() {
-  const me = byId(state.user.id) || { total_minutes: 0, week_minutes: 0, longest_minutes: 0, session_count: 0, early_sessions: 0, late_sessions: 0, days: {} };
-  const streak = streakFrom(me.days);
-  const level = levelProgress(me.total_minutes);
-  const badges = badgesFor(me, streak);
+  const me = { ...EMPTY_STATS, ...byId(state.user.id), name: state.me.name, emoji: state.me.emoji, user_id: state.user.id };
   return [
-    h("section", { class: "card hero" },
-      h("span", { class: "avatar avatar-big" }, state.me.emoji),
-      h("h2", null, state.me.name),
-      h("p", { class: "hero-title" }, `Level ${level.level} · ${level.title}`),
-      h("div", { class: "xp" },
-        h("div", { class: "xp-top" }, h("span", null, `${Math.round(me.total_minutes)} XP`), h("span", null, `${hm(level.toNext)} to Level ${level.level + 1}`)),
-        h("div", { class: "xp-bar", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(Math.round(level.ratio * 100)) }, h("span", { style: { width: `${Math.max(2, level.ratio * 100)}%` } }))),
-      h("div", { class: "hero-stats" },
-        h("div", null, h("strong", null, `🔥 ${streak}`), h("span", null, "Day streak")),
-        h("div", null, h("strong", null, hm(me.total_minutes)), h("span", null, "All time")),
-        h("div", null, h("strong", null, hm(me.longest_minutes)), h("span", null, "Longest")))),
+    heroCard(me),
+    activityCard(me, state.mine, "Your activity"),
     modulesCard(),
-    h("section", { class: "section" }, h("div", { class: "section-head" }, h("h2", null, "Last 10 weeks")), h("div", { class: "card" }, heatmap(me.days))),
-    h("section", { class: "section" },
-      h("div", { class: "section-head" }, h("h2", null, "Badges"), h("small", null, `${badges.filter((b) => b.got).length}/${badges.length}`)),
-      h("div", { class: "badges" }, badges.map((b) => h("div", { class: `badge ${b.got ? "got" : "locked"}`, title: b.detail }, h("b", { "aria-hidden": "true" }, b.icon), h("strong", null, b.name), h("small", null, b.detail))))),
+    badgesSection(me),
     h("section", { class: "section" },
       h("div", { class: "section-head" }, h("h2", null, "Your sessions"), h("button", { class: "btn btn-small btn-soft", onclick: logSession }, "+ Log one")),
       h("div", { class: "card" }, state.mine.length ? state.mine.slice(0, 20).map((s) => h("div", { class: "session-row" },
@@ -632,21 +627,154 @@ function modulesCard() {
       archived.length ? h("p", { class: "small muted", style: { marginTop: "12px" } }, "Archived: ", archived.map((m, i) => [i ? ", " : "", h("button", { class: "link", style: { padding: "0" }, title: `Bring ${m.name} back`, onclick: () => archiveModule(m, false) }, m.name)])) : null));
 }
 
-function heatmap(days = {}) {
+/* ------------------------------------------------------------
+   Profiles: yours in Me, a crewmate's in a sheet
+   ------------------------------------------------------------ */
+
+function heroCard(person) {
+  const streak = streakFrom(person.days);
+  const level = levelProgress(person.total_minutes);
+  const rank = standings(state.people, "week_minutes").find((p) => p.user_id === person.user_id)?.rank;
+  return h("section", { class: "card hero" },
+    h("span", { class: `avatar avatar-big${person.live_started_at ? " is-live" : ""}` }, person.emoji),
+    h("h2", null, person.name),
+    h("p", { class: "hero-title" }, `Level ${level.level} · ${level.title}`),
+    person.live_started_at ? h("p", { class: "hero-live" }, "🔒 Locked in on ", h("b", null, person.live_subject), person.live_location ? ` at ${person.live_location}` : "") : null,
+    h("div", { class: "xp" },
+      h("div", { class: "xp-top" }, h("span", null, `${Math.round(person.total_minutes)} XP`), h("span", null, `${hm(level.toNext)} to Level ${level.level + 1}`)),
+      h("div", { class: "xp-bar", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(Math.round(level.ratio * 100)) }, h("span", { style: { width: `${Math.max(2, level.ratio * 100)}%` } }))),
+    h("div", { class: "hero-stats" },
+      h("div", null, h("strong", null, hm(person.week_minutes)), h("span", null, rank && state.people.length > 1 ? `This week · #${rank}` : "This week")),
+      h("div", null, h("strong", null, `🔥 ${streak}`), h("span", null, "Day streak")),
+      h("div", null, h("strong", null, hm(person.total_minutes)), h("span", null, "All time"))));
+}
+
+function badgesSection(person) {
+  const badges = badgesFor(person, streakFrom(person.days));
+  return h("section", { class: "section" },
+    h("div", { class: "section-head" }, h("h2", null, "Badges"), h("small", null, `${badges.filter((b) => b.got).length}/${badges.length}`)),
+    h("div", { class: "badges" }, badges.map((b) => h("div", { class: `badge ${b.got ? "got" : "locked"}`, title: b.detail }, h("b", { "aria-hidden": "true" }, b.icon), h("strong", null, b.name), h("small", null, b.detail)))));
+}
+
+/** Weekly bars or the daily grid — one at a time, so a profile stays light. The choice sticks. */
+function activityCard(person, sessions, title) {
+  let view = readStored(ACTIVITY_KEY) === "daily" ? "daily" : "weekly";
+  const body = h("div");
+  const toggle = h("div", { class: "toggle toggle-small", role: "group", "aria-label": "Activity view" });
+  function paint() {
+    toggle.replaceChildren(...[["weekly", "Weekly"], ["daily", "Daily"]].map(([key, label]) => h("button", { type: "button", "aria-pressed": String(view === key), onclick: () => { view = key; store(ACTIVITY_KEY, key); paint(); } }, label)));
+    body.replaceChildren(...(view === "daily" ? heatmap(person.days, sessions) : weeklyChart(person.days, sessions)));
+  }
+  paint();
+  return h("section", { class: "section" },
+    h("div", { class: "section-head" }, h("h2", null, title), toggle),
+    h("div", { class: "card" }, body));
+}
+
+const dayLabel = (date) => date.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "short" });
+const shortDate = (date) => date.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+const subjectLines = (list) => list.slice(0, 3).map((s) => `${s.subject} · ${hm(s.minutes)}`).concat(list.length > 3 ? [`+ ${list.length - 3} more`] : []);
+
+/** Hours per week for the last ten weeks. This week, so far, is the bright bar. */
+function weeklyChart(days = {}, sessions = []) {
+  const weeks = weeksFrom(days, new Date(), 10);
+  const best = Math.max(0, ...weeks.map((w) => w.minutes));
+  if (!best) return [h("p", { class: "empty" }, "No study in the last ten weeks yet.")];
+  const { top, step } = hourTicks(best);
+  const pct = (minutes) => `${(minutes / top) * 100}%`;
+  const grid = [];
+  for (let v = step; v <= top; v += step) grid.push(h("span", { class: "wk-grid", style: { bottom: pct(v) } }, h("em", null, `${v / 60}h`)));
+  const cols = weeks.map((w, i) => {
+    const end = new Date(w.start); end.setDate(end.getDate() + 7);
+    const before = weeks[i - 1]?.minutes;
+    const labelled = w.minutes && (w.current || w.minutes === best);
+    const col = h("button", { type: "button", class: `wk-col${w.current ? " is-current" : ""}`, "aria-label": `Week of ${shortDate(w.start)}: ${hm(w.minutes)}` },
+      h("span", { class: "wk-bar", style: { height: w.minutes ? `max(3px, ${pct(w.minutes)})` : "0" } }),
+      labelled ? h("b", { class: "wk-value", style: { bottom: `calc(${pct(w.minutes)} + 4px)` } }, shortHours(w.minutes)) : null);
+    explain(col, () => [
+      w.current ? `This week, so far` : `Week of ${shortDate(w.start)}`,
+      w.minutes ? `${hm(w.minutes)}${before != null && !w.current ? ` · ${w.minutes >= before ? "+" : "−"}${hm(Math.abs(w.minutes - before))} on the week before` : ""}` : "No study",
+      ...subjectLines(subjectsBetween(sessions, w.start, end)),
+    ]);
+    return col;
+  });
+  return [
+    h("div", { class: "wk-chart" }, h("div", { class: "wk-plot" }, grid, cols)),
+    h("div", { class: "wk-labels", "aria-hidden": "true" }, weeks.map((w, i) => h("span", null, w.current ? "Now" : i % 3 === 0 ? shortDate(w.start) : ""))),
+    h("p", { class: "chart-note" }, "Hours per week, Monday to Sunday. Tap a bar for the details."),
+  ];
+}
+
+/** Every day of the last ten weeks; darker is more. Tap or hover for the day. */
+function heatmap(days = {}, sessions = []) {
   const today = new Date();
-  const start = new Date(today);
-  start.setDate(start.getDate() - ((today.getDay() + 6) % 7) - 63);
+  const start = weekStart(today);
+  start.setDate(start.getDate() - 63);
   const cells = [];
   for (let i = 0; i < 70; i++) {
     const day = new Date(start); day.setDate(start.getDate() + i);
     const minutes = days[localDay(day)] || 0;
-    const future = day > today;
-    const level = future ? null : minutes >= 240 ? 4 : minutes >= 120 ? 3 : minutes >= 30 ? 2 : minutes > 0 ? 1 : 0;
-    cells.push(h("span", { class: localDay(day) === localDay(today) ? "is-today" : null, dataset: level == null ? {} : { level }, title: future ? "" : `${day.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })}: ${hm(minutes)}`, style: future ? { visibility: "hidden" } : {} }));
+    if (day > today) { cells.push(h("span", { class: "heat-future", "aria-hidden": "true" })); continue; }
+    const level = minutes >= 240 ? 4 : minutes >= 120 ? 3 : minutes >= 30 ? 2 : minutes > 0 ? 1 : 0;
+    const cell = h("button", { type: "button", class: localDay(day) === localDay(today) ? "is-today" : null, dataset: { level }, "aria-label": `${dayLabel(day)}: ${minutes ? hm(minutes) : "no study"}` });
+    const next = new Date(day); next.setDate(day.getDate() + 1);
+    explain(cell, () => [dayLabel(day) + (localDay(day) === localDay(today) ? " (today)" : ""), minutes ? hm(minutes) : "No study", ...subjectLines(subjectsBetween(sessions, day, next))]);
+    cells.push(cell);
   }
-  return [h("div", { class: "heat", role: "img", "aria-label": "Study per day over the last ten weeks" }, cells),
-    h("div", { class: "heat-legend" }, h("span", null, "Mon → Sun, oldest week left"), h("span", null, "darker = more"))];
+  return [h("div", { class: "heat", role: "group", "aria-label": "Study per day over the last ten weeks" }, cells),
+    h("div", { class: "heat-legend" }, h("span", null, "Mon → Sun, oldest week left"), h("span", { class: "heat-key" }, "less", [0, 1, 2, 3, 4].map((l) => h("i", { dataset: { level: l } })), "more"))];
 }
+
+/* Details on hover (mouse), tap (touch) or focus (keyboard): one tooltip for the page. */
+const tip = h("div", { class: "tip", role: "tooltip", hidden: true });
+document.body.append(tip);
+let tipFor = null;
+function showTip(target, lines) {
+  tipFor = target;
+  tip.replaceChildren(...lines.map((line, i) => h(i ? "span" : "strong", null, line)));
+  tip.hidden = false;
+  const r = target.getBoundingClientRect();
+  const left = Math.min(Math.max(8, r.left + r.width / 2 - tip.offsetWidth / 2), innerWidth - tip.offsetWidth - 8);
+  const above = r.top - tip.offsetHeight - 10;
+  tip.style.left = `${left}px`;
+  tip.style.top = `${above > 8 ? above : r.bottom + 10}px`;
+}
+function hideTip() { tip.hidden = true; tipFor = null; }
+function explain(node, lines) {
+  node.addEventListener("pointerenter", (ev) => { if (ev.pointerType === "mouse") showTip(node, lines()); });
+  node.addEventListener("pointerleave", (ev) => { if (ev.pointerType === "mouse") hideTip(); });
+  node.addEventListener("focus", () => showTip(node, lines()));
+  node.addEventListener("blur", hideTip);
+  node.addEventListener("click", (ev) => { ev.stopPropagation(); if (tipFor === node && ev.pointerType !== "mouse") hideTip(); else showTip(node, lines()); });
+}
+document.addEventListener("click", hideTip);
+document.addEventListener("scroll", hideTip, { capture: true, passive: true });
+addEventListener("resize", hideTip);
+
+/** A crewmate's profile. Yours lives in Me. */
+async function openProfile(userId) {
+  hideTip();
+  if (userId === state.user.id) { state.tab = "me"; store(TAB_KEY, "me"); render(); scrollTo({ top: 0 }); return; }
+  const stats = byId(userId);
+  if (!stats) return;
+  const { data: sessions, error } = await db.from("sessions").select("subject, started_at, ended_at, location")
+    .eq("user_id", userId).gte("started_at", new Date(Date.now() - 70 * 86400000).toISOString()).order("started_at", { ascending: false }).limit(400);
+  if (error) return oops(error);
+  const person = { ...EMPTY_STATS, ...stats };
+  sheet((box, close) => box.append(
+    h("div", { class: "sheet-top" }, h("button", { class: "link", onclick: close }, "Close")),
+    heroCard(person),
+    activityCard(person, sessions || [], "Activity"),
+    badgesSection(person),
+    h("section", { class: "section" },
+      h("div", { class: "section-head" }, h("h2", null, "Recent sessions")),
+      h("div", { class: "card" }, (sessions || []).length ? sessions.slice(0, 6).map((s) => h("div", { class: "session-row" },
+        h("div", null, h("p", null, s.subject), h("small", null, [`${new Date(s.started_at).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })} ${timeOf(s.started_at)}–${timeOf(s.ended_at)}`, s.location].filter(Boolean).join(" · "))),
+        h("strong", { class: "feed-time" }, hm(minutesBetween(s.started_at, s.ended_at))))) : h("p", { class: "empty" }, `${person.name} hasn't logged anything recently.`)))));
+}
+
+/** Anywhere a person appears, tapping them opens their profile. */
+const personButton = (p, className, ...kids) => h("button", { type: "button", class: `person-btn ${className}`, "aria-label": `${p.name}'s profile`, onclick: (ev) => { ev.stopPropagation(); openProfile(p.user_id); } }, ...kids);
 
 function settingsCard() {
   const share = h("input", { type: "checkbox", class: "switch", checked: state.me.share_location, "aria-label": "Share where you study", onchange: async (ev) => {

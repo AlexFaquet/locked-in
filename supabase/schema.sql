@@ -506,6 +506,9 @@ grant execute on function public.link_sync(text, jsonb) to anon, authenticated;
    ------------------------------------------------------------ */
 
 alter publication supabase_realtime add table public.live, public.sessions, public.pings;
+-- Joining a crew and changing your name show up live too. The app listens for
+-- inserts and updates only; Realtime can't apply RLS to deletes.
+alter publication supabase_realtime add table public.crew_members, public.profiles;
 
 -- A crew with nobody left in it goes too, so its invite code stops working.
 create function private.drop_empty_crew()

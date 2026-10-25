@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { levelFor, levelProgress, minutesForLevel, streakFrom, badgesFor, standings, chaseLine, hm, clock, untilReset, encodeLinkCode } from "../game.mjs";
+import { levelFor, levelProgress, minutesForLevel, streakFrom, badgesFor, standings, chaseLine, hm, clock, untilReset, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours } from "../game.mjs";
 
 test("levels get steeper and the bar measures progress inside one", () => {
   assert.deepEqual([0, 149, 150, 599, 600, 2400, 12150].map(levelFor), [1, 1, 2, 2, 3, 5, 10]);
@@ -41,4 +41,28 @@ test("formatting", () => {
   assert.equal(untilReset(new Date(2026, 9, 26, 0, 0)), "7d 0h", "Monday at midnight: a whole week to go");
   const code = encodeLinkCode({ url: "https://x.supabase.co", key: "sb_publishable_1", link: "li_abc" });
   assert.deepEqual(JSON.parse(Buffer.from(code.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString()), { u: "https://x.supabase.co", k: "sb_publishable_1", l: "li_abc" });
+});
+
+test("weeks run Monday to Sunday and this week is the last, so far", () => {
+  const sunday = new Date(2026, 9, 25, 20);
+  assert.equal(weekStart(sunday).toDateString(), new Date(2026, 9, 19).toDateString());
+  const weeks = weeksFrom({ "2026-10-19": 30, "2026-10-25": 45, "2026-10-18": 60, "2026-10-12": 15 }, sunday, 3);
+  assert.deepEqual(weeks.map((w) => [w.start.getDate(), w.minutes, w.current]), [[5, 0, false], [12, 75, false], [19, 75, true]]);
+});
+
+test("a range's subjects, most first, by when each session started", () => {
+  const at = (d, t) => new Date(`2026-10-${d}T${t}:00`).toISOString();
+  const sessions = [
+    { subject: "IR", started_at: at(22, "18:53"), ended_at: at(22, "21:00") },
+    { subject: "Maths", started_at: at(22, "09:00"), ended_at: at(22, "09:30") },
+    { subject: "IR", started_at: at(23, "13:10"), ended_at: at(23, "14:18") },
+  ];
+  assert.deepEqual(subjectsBetween(sessions, new Date(2026, 9, 22), new Date(2026, 9, 23)), [{ subject: "IR", minutes: 127 }, { subject: "Maths", minutes: 30 }]);
+});
+
+test("chart gridlines land on whole hours", () => {
+  assert.deepEqual(hourTicks(0), { top: 60, step: 60 });
+  assert.deepEqual(hourTicks(255), { top: 360, step: 120 });
+  assert.deepEqual(hourTicks(750), { top: 900, step: 300 });
+  assert.deepEqual([shortHours(255), shortHours(750)], ["4.3h", "13h"]);
 });

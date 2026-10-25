@@ -28,6 +28,12 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
 - **Earn XP** — a point a minute. Levels get steeper (Level 2 at 2.5 hours,
   Level 5 at 40, Level 10 at 202.5). Streaks count days with 30+ minutes;
   badges are for early starts, late nights, long sessions and milestones.
+- **Profiles.** Tap anyone on the board, the podium, the live list or the
+  feed to see their level, streak, badges, activity and recent sessions. Your
+  own is under Me. *Activity* switches between **Weekly** (hours per week for
+  ten weeks, this week bright) and **Daily** (every day as a square). Tap or
+  hover a bar or a square to see its total and which modules it went on.
+  Everyone's module *list* stays private.
 - **The board** resets every Monday at midnight. It shows the podium, how far
   you are from the next place, and the crew's recent sessions.
 - **Location is opt-in.** Turn off *Share where I study* and it's hidden

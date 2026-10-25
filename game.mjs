@@ -62,6 +62,53 @@ export function chaseLine(ranked, meId, key = "week_minutes") {
   return `${hm(gap)} to overtake ${ahead.name} for #${ahead.rank}.`;
 }
 
+/** Monday 00:00 of the week `date` falls in, local time — the board's week. */
+export function weekStart(date) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return d;
+}
+
+/** The last `count` weeks from daily minutes, oldest first. The last one is this week so far. */
+export function weeksFrom(days = {}, now = new Date(), count = 10) {
+  const thisWeek = weekStart(now);
+  const weeks = [];
+  for (let back = count - 1; back >= 0; back--) {
+    const start = new Date(thisWeek);
+    start.setDate(start.getDate() - 7 * back);
+    let minutes = 0;
+    for (let i = 0; i < 7; i++) {
+      const day = new Date(start);
+      day.setDate(start.getDate() + i);
+      minutes += days[localDay(day)] || 0;
+    }
+    weeks.push({ start, minutes, current: back === 0 });
+  }
+  return weeks;
+}
+
+/** Minutes per subject for sessions that started in [from, to), most first. */
+export function subjectsBetween(sessions = [], from, to) {
+  const totals = new Map();
+  for (const s of sessions) {
+    const start = +new Date(s.started_at);
+    if (start < +from || start >= +to) continue;
+    totals.set(s.subject, (totals.get(s.subject) || 0) + (+new Date(s.ended_at) - start) / 60000);
+  }
+  return [...totals].map(([subject, minutes]) => ({ subject, minutes })).sort((a, b) => b.minutes - a.minutes);
+}
+
+/** Whole-hour gridlines, about three of them, for a chart whose tallest bar is `maxMinutes`. */
+export function hourTicks(maxMinutes) {
+  const hours = Math.max(1, Math.ceil(maxMinutes / 60));
+  const step = hours <= 3 ? 1 : hours <= 6 ? 2 : hours <= 15 ? 5 : hours <= 30 ? 10 : 20;
+  return { top: Math.ceil(hours / step) * step * 60, step: step * 60 };
+}
+
+/** "4.3h" — short enough to sit above a narrow bar. */
+export const shortHours = (minutes) => `${(minutes / 60).toFixed(minutes < 600 ? 1 : 0)}h`;
+
 /** "1h 05m", "45m", "0m" */
 export function hm(minutes) {
   const m = Math.max(0, Math.round(minutes));
