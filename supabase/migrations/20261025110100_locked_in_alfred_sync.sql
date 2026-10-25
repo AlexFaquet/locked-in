@@ -73,3 +73,17 @@ grant execute on function public.link_sync(text, jsonb) to anon, authenticated;
    ------------------------------------------------------------ */
 
 alter publication supabase_realtime add table public.live, public.sessions, public.pings;
+
+-- A crew with nobody left in it goes too, so its invite code stops working.
+create function private.drop_empty_crew()
+returns trigger
+language plpgsql security definer set search_path = ''
+as $$
+begin
+  delete from public.crews c
+  where c.id = old.crew_id and not exists (select 1 from public.crew_members m where m.crew_id = old.crew_id);
+  return null;
+end $$;
+revoke execute on function private.drop_empty_crew() from public, anon, authenticated;
+create trigger crew_members_drop_empty after delete on public.crew_members
+  for each row execute function private.drop_empty_crew();
