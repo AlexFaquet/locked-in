@@ -150,7 +150,8 @@ function welcome() {
       h("span", { class: "label", style: { marginTop: "20px" } }, "Pick your emoji"),
       emojiPicker(emoji, (e) => { emoji = e; }),
       h("div", { style: { marginTop: "24px" } }, go)),
-    h("p", { class: "small muted", style: { marginTop: "18px" } }, "No email or password. Your account lives in this browser — add Locked In to your home screen so you keep it.")));
+    h("p", { class: "small muted", style: { marginTop: "18px" } }, "No email or password. Your account lives on this device; add others from Me whenever you like."),
+    h("button", { class: "link", style: { marginTop: "6px" }, onclick: () => enterCode() }, "I already use Locked In on another device")));
   name.focus();
 }
 
@@ -534,7 +535,8 @@ function settingsCard() {
       h("div", { class: "setting" }, h("div", null, h("strong", null, `${state.me.emoji} ${state.me.name}`), h("small", null, "Your name and emoji")), h("button", { class: "btn btn-small btn-soft", onclick: editProfile }, "Edit")),
       h("div", { class: "setting" }, h("div", null, h("strong", null, "Share where I study"), h("small", null, "So friends can come and join you")), share),
       canNotify ? h("div", { class: "setting" }, h("div", null, h("strong", null, "Notifications"), h("small", null, Notification.permission === "granted" ? "On while Locked In is open" : "When a friend locks in or pings you")),
-        Notification.permission === "granted" ? h("span", { class: "pill" }, "✓ On") : h("button", { class: "btn btn-small btn-soft", onclick: async () => { await Notification.requestPermission(); render(); } }, "Turn on")) : null),
+        Notification.permission === "granted" ? h("span", { class: "pill" }, "✓ On") : h("button", { class: "btn btn-small btn-soft", onclick: async () => { await Notification.requestPermission(); render(); } }, "Turn on")) : null,
+      h("div", { class: "setting" }, h("div", null, h("strong", null, "Your other devices"), h("small", null, "Use this account on your laptop or another phone")), h("button", { class: "btn btn-small btn-soft", onclick: showPairingCode }, "Add a device"))),
     h("div", { class: "section-head", style: { marginTop: "26px" } }, h("h2", null, "Crews"), h("button", { class: "btn btn-small btn-soft", onclick: crewSheet }, "+ Join / start")),
     h("div", { class: "card" }, state.crews.map((c) => h("div", { class: "crew-row" },
       h("div", null, h("strong", null, c.name), h("p", { class: "small muted" }, `${c.members} ${c.members === 1 ? "member" : "members"} · code `, h("b", null, c.code))),
@@ -543,8 +545,60 @@ function settingsCard() {
         h("button", { class: "link", onclick: () => leaveCrew(c) }, "Leave"))))),
     linkingCard(),
     h("div", { class: "card", style: { marginTop: "16px" } },
-      h("p", { class: "small muted" }, "Your account lives in this browser. Clearing site data or switching phones starts a new one — add Locked In to your home screen (Share → Add to Home Screen) so it sticks."),
-      h("button", { class: "link", style: { color: "var(--danger)", marginTop: "8px" }, onclick: deleteEverything }, "Delete my account and sessions")));
+      h("p", { class: "small muted" }, "Your account lives on the devices you've added. Before clearing this browser's data, add another device so you don't lose it. On a phone, Share → Add to Home Screen keeps it handy."),
+      h("button", { class: "link", style: { marginTop: "8px" }, onclick: () => enterCode({ switching: true }) }, "Switch this device to another account"),
+      h("button", { class: "link", style: { color: "var(--danger)", marginTop: "2px" }, onclick: deleteEverything }, "Delete my account and sessions")));
+}
+
+/* ------------------------------------------------------------
+   Devices: a short code from one device signs another in as you
+   ------------------------------------------------------------ */
+
+async function showPairingCode() {
+  const { data, error } = await db.rpc("create_pairing_code");
+  if (error) return oops(error);
+  const until = new Date(data.expires_at);
+  const left = h("p", { class: "muted", style: { marginTop: "10px", fontWeight: "800", textAlign: "center" } }, "Expires in 10:00");
+  sheet((box, done) => box.append(
+    h("h2", null, "Add a device 📱💻"),
+    h("p", { class: "muted", style: { marginTop: "6px" } }, "On the other device, open Locked In and tap ", h("b", null, "I already use Locked In on another device"), ", then enter:"),
+    h("p", { class: "code pair-code", "aria-label": `Code ${data.code.split("").join(" ")}` }, `${data.code.slice(0, 3)} ${data.code.slice(3)}`),
+    left,
+    h("p", { class: "small muted", style: { marginTop: "6px" } }, "It works once. Keep it to yourself — whoever types it in becomes you."),
+    h("div", { class: "btn-row" }, h("button", { class: "btn btn-soft", onclick: done }, "Done"), h("button", { class: "btn", onclick: () => { done(); showPairingCode(); } }, "New code"))));
+  const timer = setInterval(() => {
+    if (!left.isConnected) return clearInterval(timer);
+    const seconds = Math.max(0, Math.round((+until - Date.now()) / 1000));
+    left.textContent = seconds ? `Expires in ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}` : "Expired — make a new code.";
+  }, 1000);
+}
+
+function enterCode({ switching = false } = {}) {
+  const input = h("input", { id: "pair-code", class: "input pair-input", maxlength: 7, placeholder: "ABC 123", autocapitalize: "characters", autocomplete: "one-time-code", spellcheck: "false", "aria-label": "Code from your other device" });
+  sheet((box, close) => box.append(
+    h("h2", null, switching ? "Switch account" : "Welcome back 👋"),
+    h("p", { class: "muted", style: { marginTop: "6px" } }, "On a device where you're signed in, go to Me → ", h("b", null, "Add a device"), " and type the code here."),
+    switching && state.me ? h("p", { class: "small", style: { marginTop: "10px", color: "var(--danger)", fontWeight: "800" } }, `This device stops being ${state.me.name}. That account's sessions stay on the board, so delete it first if it was a mistake.`) : null,
+    h("form", { style: { marginTop: "16px" }, onsubmit: async (ev) => {
+      ev.preventDefault();
+      const go = ev.currentTarget.querySelector("button[type=submit]");
+      go.disabled = true;
+      try { await pairWith(input.value); }
+      catch (error) { oops(error); go.disabled = false; }
+    } },
+      input,
+      h("div", { class: "btn-row" }, h("button", { class: "btn btn-soft", type: "button", onclick: close }, "Cancel"), h("button", { class: "btn", type: "submit" }, "Sign in")))));
+}
+
+async function pairWith(code) {
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/pair`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: code.trim() }) });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || !body.token_hash) throw new Error(body.error || "That didn't work. Try a new code.");
+  if (channel) { db.removeChannel(channel); channel = null; }
+  const { error } = await db.auth.verifyOtp({ token_hash: body.token_hash, type: "email" });
+  if (error) throw error;
+  // Start clean as the account this device has just become.
+  location.reload();
 }
 
 /* ------------------------------------------------------------

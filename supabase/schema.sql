@@ -520,3 +520,69 @@ end $$;
 revoke execute on function private.drop_empty_crew() from public, anon, authenticated;
 create trigger crew_members_drop_empty after delete on public.crew_members
   for each row execute function private.drop_empty_crew();
+
+/* ------------------------------------------------------------
+   Pairing devices
+   ------------------------------------------------------------ */
+
+-- A short code from a device you're signed in on lets another device sign
+-- in as you. No email or password. One code per person at a time; it works
+-- once and lasts ten minutes. Only its hash is stored.
+create table private.pairing_codes (
+  user_id uuid primary key references public.profiles (id) on delete cascade,
+  code_hash text not null unique,
+  expires_at timestamptz not null,
+  used_at timestamptz
+);
+alter table private.pairing_codes enable row level security;
+revoke all on private.pairing_codes from public, anon, authenticated;
+
+create function public.create_pairing_code()
+returns jsonb
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_user uuid := (select auth.uid());
+  v_code text;
+  v_expires timestamptz := now() + interval '10 minutes';
+begin
+  if v_user is null then raise exception 'Sign in first.' using errcode = '42501'; end if;
+  if not exists (select 1 from public.profiles where id = v_user) then raise exception 'Make your profile first.' using errcode = '42501'; end if;
+  -- Six of the 32 unambiguous characters: about a billion codes. A clash with
+  -- someone else's live code just means drawing again.
+  for attempt in 1..5 loop
+    select string_agg(substr('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 1 + (get_byte(b.bytes, i) % 32), 1), '' order by i)
+      into v_code
+      from (select extensions.gen_random_bytes(6) as bytes) b, generate_series(0, 5) as i;
+    begin
+      insert into private.pairing_codes (user_id, code_hash, expires_at, used_at)
+      values (v_user, encode(sha256(convert_to(v_code, 'UTF8')), 'hex'), v_expires, null)
+      on conflict (user_id) do update set code_hash = excluded.code_hash, expires_at = excluded.expires_at, used_at = null;
+      return jsonb_build_object('code', v_code, 'expires_at', v_expires);
+    exception when unique_violation then
+      continue;
+    end;
+  end loop;
+  raise exception 'Couldn''t make a code. Try again.' using errcode = 'P0001';
+end $$;
+revoke execute on function public.create_pairing_code() from public, anon;
+grant execute on function public.create_pairing_code() to authenticated;
+
+-- Only the pair edge function (service role) redeems codes; it then signs
+-- the new device in as the code's owner.
+create function public.redeem_pairing_code(p_code text)
+returns uuid
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_user uuid;
+begin
+  update private.pairing_codes set used_at = now()
+  where code_hash = encode(sha256(convert_to(upper(regexp_replace(coalesce(p_code, ''), '[^A-Za-z0-9]', '', 'g')), 'UTF8')), 'hex')
+    and used_at is null and expires_at > now()
+  returning user_id into v_user;
+  if v_user is null then raise exception 'That code didn''t work. Codes last ten minutes and work once, so make a new one.' using errcode = 'P0002'; end if;
+  return v_user;
+end $$;
+revoke execute on function public.redeem_pairing_code(text) from public, anon, authenticated;
+grant execute on function public.redeem_pairing_code(text) to service_role;

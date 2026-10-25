@@ -8,9 +8,12 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
 
 ## How it works
 
-- **Join with a name and an emoji.** There's no email or password: your
-  account is an anonymous Supabase account kept in your browser. Clearing site
-  data or switching phones starts a new one.
+- **Join with a name and an emoji.** There's no email or password; your
+  account is a Supabase account kept on your device. To use it on a laptop or
+  another phone, go to Me → *Add a device* for a six-character code, and on the
+  new device tap *I already use Locked In on another device*. The code works
+  once, for ten minutes. Add a second device before clearing a browser's data,
+  or the account goes with it.
 - **Crews are invite-only.** You see yourself and the people who share a
   crew with you, nobody else. Start a crew to get an eight-character code, or
   open someone's invite link (`?join=CODE`).
@@ -39,6 +42,14 @@ security:
 | `live` | you and your crewmates | you |
 | `pings` | sender and recipient | the sender, two minutes apart per kind |
 | `link_keys` | you (never the key itself) | you |
+
+Pairing a device: `create_pairing_code()` stores a hash of a one-time code,
+and the `pair` edge function ([`supabase/functions/pair`](supabase/functions/pair/index.ts))
+redeems it with `redeem_pairing_code()`, which only the service role can call.
+It then issues a one-time sign-in for the code's owner, which the new device
+exchanges for its own session. A sign-in needs an email address, so an account
+that's paired gets a placeholder on the reserved `.invalid` domain. Nothing is
+ever sent to it.
 
 `room_stats(tz)` returns the board for everyone you can see: week, today and
 all-time minutes, streak days, and the counts the badges use. Realtime

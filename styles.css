@@ -293,3 +293,7 @@ p { margin: 0; }
   .form-grid { grid-template-columns: 1fr 1fr; }
   .form-grid > :first-child { grid-column: 1 / -1; }
 }
+
+/* ---------- pairing ---------- */
+.pair-code { margin-top: 18px; text-align: center; font-size: 44px; letter-spacing: .12em; }
+.pair-input { text-align: center; font: 600 30px var(--display); letter-spacing: .2em; text-transform: uppercase; }
