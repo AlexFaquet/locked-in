@@ -1,0 +1,522 @@
+-- The whole Locked In schema as it stands. Applied to the Supabase project
+-- in parts; this file is the reference for what's there.
+--
+-- Locked In — a study tracker for a crew of friends.
+--
+-- Access model: you can see yourself and anyone who shares a crew with you,
+-- and you can change only your own rows. Every table in public is behind
+-- RLS. Joining a crew needs its invite code, so signing up shows you nothing
+-- until someone lets you in.
+--
+-- Another app of yours can be linked with a link key you create in the app.
+-- link_sync() acts for that one user and nobody else.
+
+create extension if not exists btree_gist with schema extensions;
+
+create schema if not exists private;
+grant usage on schema private to authenticated;
+
+/* ------------------------------------------------------------
+   Tables
+   ------------------------------------------------------------ */
+
+create table public.profiles (
+  id uuid primary key references auth.users (id) on delete cascade,
+  name text not null check (char_length(btrim(name)) between 1 and 24),
+  emoji text not null default '📚' check (char_length(emoji) between 1 and 8),
+  share_location boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+create table public.crews (
+  id uuid primary key default gen_random_uuid(),
+  name text not null check (char_length(btrim(name)) between 1 and 40),
+  code text not null unique,
+  -- A crew outlives whoever started it.
+  created_by uuid references public.profiles (id) on delete set null,
+  created_at timestamptz not null default now()
+);
+create index crews_created_by_idx on public.crews (created_by);
+
+create table public.crew_members (
+  crew_id uuid not null references public.crews (id) on delete cascade,
+  user_id uuid not null references public.profiles (id) on delete cascade,
+  joined_at timestamptz not null default now(),
+  primary key (crew_id, user_id)
+);
+create index crew_members_user_id_idx on public.crew_members (user_id);
+
+-- Finished sessions. The id is chosen by whoever started the timer, so a
+-- session keeps one identity across the app, a linked app and this table.
+create table public.sessions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references public.profiles (id) on delete cascade,
+  subject text not null check (char_length(btrim(subject)) between 1 and 40),
+  started_at timestamptz not null,
+  ended_at timestamptz not null,
+  location text check (char_length(location) <= 80),
+  updated_at timestamptz not null default now(),
+  constraint sessions_order check (ended_at > started_at),
+  constraint sessions_length check (ended_at - started_at <= interval '16 hours'),
+  -- One person can't be in two sessions at once; this holds under concurrency.
+  constraint sessions_no_overlap exclude using gist (user_id with =, tstzrange(started_at, ended_at) with &&)
+);
+create index sessions_user_started_idx on public.sessions (user_id, started_at desc);
+
+-- One row per person: who is studying right now. Stopping clears the row
+-- rather than deleting it, because Realtime can't apply RLS to deletes.
+create table public.live (
+  user_id uuid primary key default auth.uid() references public.profiles (id) on delete cascade,
+  session_id uuid,
+  subject text check (char_length(btrim(subject)) between 1 and 40),
+  started_at timestamptz,
+  location text check (char_length(location) <= 80),
+  updated_at timestamptz not null default now(),
+  constraint live_shape check ((started_at is null) = (subject is null) and (started_at is null) = (session_id is null))
+);
+
+-- "I'm coming" and cheers between crewmates.
+create table public.pings (
+  id bigint generated always as identity primary key,
+  from_user uuid not null default auth.uid() references public.profiles (id) on delete cascade,
+  to_user uuid not null references public.profiles (id) on delete cascade,
+  kind text not null check (kind in ('joining', 'cheer')),
+  created_at timestamptz not null default now(),
+  constraint pings_not_self check (from_user <> to_user)
+);
+create index pings_to_user_idx on public.pings (to_user, created_at desc);
+create index pings_from_user_idx on public.pings (from_user);
+
+-- Keys for linked apps. Only a SHA-256 of the key is stored; the key itself is
+-- shown once, when it's made.
+create table public.link_keys (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references public.profiles (id) on delete cascade,
+  label text not null default 'Linked app' check (char_length(btrim(label)) between 1 and 30),
+  key_hash text not null unique,
+  created_at timestamptz not null default now(),
+  last_used_at timestamptz
+);
+create index link_keys_user_id_idx on public.link_keys (user_id);
+
+/* ------------------------------------------------------------
+   Who can see whom
+   ------------------------------------------------------------ */
+
+-- SECURITY DEFINER so a policy on crew_members can ask about crew_members
+-- without recursing into its own policy. Both answer only about the caller.
+create function private.my_crews()
+returns setof uuid
+language sql stable security definer set search_path = ''
+as $$
+  select crew_id from public.crew_members where user_id = (select auth.uid())
+$$;
+
+create function private.shares_crew(other uuid)
+returns boolean
+language sql stable security definer set search_path = ''
+as $$
+  select other = (select auth.uid()) or exists (
+    select 1
+    from public.crew_members mine
+    join public.crew_members theirs on theirs.crew_id = mine.crew_id
+    where mine.user_id = (select auth.uid()) and theirs.user_id = other
+  )
+$$;
+
+-- Postgres grants EXECUTE to PUBLIC on every new function; take that back.
+revoke execute on function private.my_crews(), private.shares_crew(uuid) from public, anon;
+grant execute on function private.my_crews(), private.shares_crew(uuid) to authenticated;
+
+/* ------------------------------------------------------------
+   Row-level security
+   ------------------------------------------------------------ */
+
+alter table public.profiles enable row level security;
+alter table public.crews enable row level security;
+alter table public.crew_members enable row level security;
+alter table public.sessions enable row level security;
+alter table public.live enable row level security;
+alter table public.pings enable row level security;
+alter table public.link_keys enable row level security;
+
+
+create policy "see yourself and your crewmates" on public.profiles for select to authenticated
+  using ((select private.shares_crew(id)));
+create policy "create your own profile" on public.profiles for insert to authenticated
+  with check (id = (select auth.uid()));
+create policy "edit your own profile" on public.profiles for update to authenticated
+  using (id = (select auth.uid())) with check (id = (select auth.uid()));
+create policy "delete your own profile" on public.profiles for delete to authenticated
+  using (id = (select auth.uid()));
+
+create policy "see your crews" on public.crews for select to authenticated
+  using (id in (select private.my_crews()));
+
+create policy "see who is in your crews" on public.crew_members for select to authenticated
+  using (crew_id in (select private.my_crews()));
+create policy "leave a crew" on public.crew_members for delete to authenticated
+  using (user_id = (select auth.uid()));
+
+create policy "see your crewmates' sessions" on public.sessions for select to authenticated
+  using ((select private.shares_crew(user_id)));
+create policy "log your own sessions" on public.sessions for insert to authenticated
+  with check (user_id = (select auth.uid()));
+create policy "edit your own sessions" on public.sessions for update to authenticated
+  using (user_id = (select auth.uid())) with check (user_id = (select auth.uid()));
+create policy "delete your own sessions" on public.sessions for delete to authenticated
+  using (user_id = (select auth.uid()));
+
+create policy "see who is studying" on public.live for select to authenticated
+  using ((select private.shares_crew(user_id)));
+create policy "start your own timer" on public.live for insert to authenticated
+  with check (user_id = (select auth.uid()));
+create policy "change your own timer" on public.live for update to authenticated
+  using (user_id = (select auth.uid())) with check (user_id = (select auth.uid()));
+
+create policy "see pings to and from you" on public.pings for select to authenticated
+  using (to_user = (select auth.uid()) or from_user = (select auth.uid()));
+create policy "ping a crewmate" on public.pings for insert to authenticated
+  with check (from_user = (select auth.uid()) and (select private.shares_crew(to_user)));
+
+create policy "see your own link keys" on public.link_keys for select to authenticated
+  using (user_id = (select auth.uid()));
+create policy "make your own link keys" on public.link_keys for insert to authenticated
+  with check (user_id = (select auth.uid()));
+create policy "revoke your own link keys" on public.link_keys for delete to authenticated
+  using (user_id = (select auth.uid()));
+
+-- The Data API only reaches what these grants allow; RLS then picks the rows.
+revoke all on public.profiles, public.crews, public.crew_members, public.sessions, public.live, public.pings, public.link_keys from anon, authenticated;
+grant select, insert, update, delete on public.profiles, public.sessions to authenticated;
+grant select on public.crews to authenticated;
+grant select, delete on public.crew_members to authenticated;
+grant select, insert, update on public.live to authenticated;
+grant select, insert on public.pings to authenticated;
+grant insert, delete on public.link_keys to authenticated;
+-- user_id is needed by the delete policy; key_hash is never readable.
+grant select (id, user_id, label, created_at, last_used_at) on public.link_keys to authenticated;
+
+/* ------------------------------------------------------------
+   Triggers
+   ------------------------------------------------------------ */
+
+-- A place is only kept if its owner shares where they study.
+create function private.respect_location_sharing()
+returns trigger
+language plpgsql security definer set search_path = ''
+as $$
+begin
+  if new.location is not null and not coalesce((select share_location from public.profiles where id = new.user_id), false) then
+    new.location := null;
+  end if;
+  new.location := nullif(btrim(new.location), '');
+  new.updated_at := now();
+  return new;
+end $$;
+revoke execute on function private.respect_location_sharing() from public, anon, authenticated;
+
+create trigger sessions_location before insert or update on public.sessions
+  for each row execute function private.respect_location_sharing();
+create trigger live_location before insert or update on public.live
+  for each row execute function private.respect_location_sharing();
+
+-- Turning sharing off also takes back the places already shared.
+create function private.forget_locations()
+returns trigger
+language plpgsql security definer set search_path = ''
+as $$
+begin
+  update public.sessions set location = null where user_id = new.id and location is not null;
+  update public.live set location = null where user_id = new.id and location is not null;
+  return new;
+end $$;
+revoke execute on function private.forget_locations() from public, anon, authenticated;
+create trigger profiles_forget_locations after update of share_location on public.profiles
+  for each row when (old.share_location and not new.share_location)
+  execute function private.forget_locations();
+
+-- Sessions can't be logged in the future (with a minute for clock drift).
+create function private.no_future_sessions()
+returns trigger
+language plpgsql set search_path = ''
+as $$
+begin
+  if new.ended_at > now() + interval '1 minute' then
+    raise exception 'A session can''t end in the future.' using errcode = '22023';
+  end if;
+  if new.started_at < now() - interval '400 days' then
+    raise exception 'That session is too long ago to log.' using errcode = '22023';
+  end if;
+  return new;
+end $$;
+revoke execute on function private.no_future_sessions() from public, anon, authenticated;
+create trigger sessions_not_future before insert or update on public.sessions
+  for each row execute function private.no_future_sessions();
+
+-- One ping of each kind per pair every two minutes, so nobody gets spammed.
+create function private.throttle_pings()
+returns trigger
+language plpgsql security definer set search_path = ''
+as $$
+begin
+  if exists (select 1 from public.pings where from_user = new.from_user and to_user = new.to_user and kind = new.kind and created_at > now() - interval '2 minutes') then
+    raise exception 'Easy — you just did that.' using errcode = '22023';
+  end if;
+  return new;
+end $$;
+revoke execute on function private.throttle_pings() from public, anon, authenticated;
+create trigger pings_throttle before insert on public.pings
+  for each row execute function private.throttle_pings();
+
+/* ------------------------------------------------------------
+   Crews
+   ------------------------------------------------------------ */
+
+-- 32 unambiguous characters (no 0/O, 1/I): eight of them is ~10^12 codes.
+create function private.new_crew_code()
+returns text
+language sql volatile set search_path = ''
+as $$
+  select string_agg(substr('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 1 + (get_byte(b.bytes, i) % 32), 1), '' order by i)
+  from (select extensions.gen_random_bytes(8) as bytes) b, generate_series(0, 7) as i
+$$;
+revoke execute on function private.new_crew_code() from public, anon, authenticated;
+
+-- Creating and joining need to see a crew you aren't in yet, so they run as
+-- definer. Each checks the caller itself.
+create function public.create_crew(p_name text)
+returns public.crews
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_user uuid := (select auth.uid());
+  v_crew public.crews;
+begin
+  if v_user is null then raise exception 'Sign in first.' using errcode = '42501'; end if;
+  if not exists (select 1 from public.profiles where id = v_user) then raise exception 'Make your profile first.' using errcode = '42501'; end if;
+  if (select count(*) from public.crews where created_by = v_user) >= 10 then raise exception 'You''ve started ten crews already.' using errcode = '22023'; end if;
+  insert into public.crews (name, code, created_by) values (btrim(p_name), private.new_crew_code(), v_user) returning * into v_crew;
+  insert into public.crew_members (crew_id, user_id) values (v_crew.id, v_user);
+  return v_crew;
+end $$;
+
+create function public.join_crew(p_code text)
+returns public.crews
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_user uuid := (select auth.uid());
+  v_crew public.crews;
+begin
+  if v_user is null then raise exception 'Sign in first.' using errcode = '42501'; end if;
+  if not exists (select 1 from public.profiles where id = v_user) then raise exception 'Make your profile first.' using errcode = '42501'; end if;
+  select * into v_crew from public.crews where code = upper(regexp_replace(coalesce(p_code, ''), '[^A-Za-z0-9]', '', 'g'));
+  if v_crew.id is null then raise exception 'No crew has that code.' using errcode = 'P0002'; end if;
+  if (select count(*) from public.crew_members where crew_id = v_crew.id) >= 50 then raise exception 'That crew is full.' using errcode = '22023'; end if;
+  insert into public.crew_members (crew_id, user_id) values (v_crew.id, v_user) on conflict do nothing;
+  return v_crew;
+end $$;
+
+revoke execute on function public.create_crew(text), public.join_crew(text) from public, anon;
+grant execute on function public.create_crew(text), public.join_crew(text) to authenticated;
+
+/* ------------------------------------------------------------
+   Stats — one call for the leaderboard, levels and who's live
+   ------------------------------------------------------------ */
+
+-- SECURITY INVOKER: from the app it runs under the caller's RLS; from
+-- link_sync (definer) the explicit p_user scoping is what limits it.
+create function private.stats_for(p_user uuid, p_tz text)
+returns table (
+  user_id uuid, name text, emoji text,
+  live_subject text, live_started_at timestamptz, live_location text,
+  total_minutes integer, week_minutes integer, today_minutes integer,
+  longest_minutes integer, session_count integer, early_sessions integer, late_sessions integer,
+  days jsonb
+)
+language sql stable set search_path = ''
+as $$
+  with bounds as (
+    select (date_trunc('week', now() at time zone p_tz)) at time zone p_tz as week_start,
+           (date_trunc('day', now() at time zone p_tz)) at time zone p_tz as day_start
+  ),
+  people as (
+    select p_user as id
+    union
+    select theirs.user_id
+    from public.crew_members mine
+    join public.crew_members theirs on theirs.crew_id = mine.crew_id
+    where mine.user_id = p_user
+  ),
+  timed as (
+    select s.user_id, s.started_at, s.ended_at from public.sessions s where s.user_id in (select id from people)
+    union all
+    select l.user_id, l.started_at, greatest(now(), l.started_at) from public.live l
+    where l.started_at is not null and l.user_id in (select id from people)
+  )
+  select
+    pr.id, pr.name, pr.emoji,
+    l.subject, l.started_at, case when pr.share_location then l.location end,
+    coalesce((select round(sum(extract(epoch from t.ended_at - t.started_at)) / 60) from timed t where t.user_id = pr.id), 0)::integer,
+    coalesce((select round(sum(extract(epoch from least(t.ended_at, now()) - greatest(t.started_at, b.week_start))) / 60) from timed t where t.user_id = pr.id and t.ended_at > b.week_start), 0)::integer,
+    coalesce((select round(sum(extract(epoch from least(t.ended_at, now()) - greatest(t.started_at, b.day_start))) / 60) from timed t where t.user_id = pr.id and t.ended_at > b.day_start), 0)::integer,
+    coalesce((select round(max(extract(epoch from t.ended_at - t.started_at)) / 60) from timed t where t.user_id = pr.id), 0)::integer,
+    (select count(*) from timed t where t.user_id = pr.id)::integer,
+    (select count(*) from timed t where t.user_id = pr.id and extract(hour from t.started_at at time zone p_tz) < 8)::integer,
+    (select count(*) from timed t where t.user_id = pr.id and extract(hour from t.started_at at time zone p_tz) >= 22)::integer,
+    coalesce((
+      select jsonb_object_agg(d.day, d.minutes)
+      from (
+        select to_char(t.started_at at time zone p_tz, 'YYYY-MM-DD') as day, round(sum(extract(epoch from t.ended_at - t.started_at)) / 60)::integer as minutes
+        from timed t where t.user_id = pr.id and t.started_at > now() - interval '70 days'
+        group by 1
+      ) d
+    ), '{}'::jsonb)
+  from people pe
+  join public.profiles pr on pr.id = pe.id
+  cross join bounds b
+  left join public.live l on l.user_id = pr.id and l.started_at is not null
+$$;
+revoke execute on function private.stats_for(uuid, text) from public, anon;
+grant execute on function private.stats_for(uuid, text) to authenticated;
+
+create function public.room_stats(p_tz text default 'Europe/London')
+returns table (
+  user_id uuid, name text, emoji text,
+  live_subject text, live_started_at timestamptz, live_location text,
+  total_minutes integer, week_minutes integer, today_minutes integer,
+  longest_minutes integer, session_count integer, early_sessions integer, late_sessions integer,
+  days jsonb
+)
+language sql stable security invoker set search_path = ''
+as $$
+  select * from private.stats_for((select auth.uid()), p_tz)
+$$;
+revoke execute on function public.room_stats(text) from public, anon;
+grant execute on function public.room_stats(text) to authenticated;
+
+/* ------------------------------------------------------------
+   Link keys
+   ------------------------------------------------------------ */
+
+create function public.create_link_key(p_label text default 'Linked app')
+returns text
+language plpgsql security invoker set search_path = ''
+as $$
+declare
+  v_key text := 'li_' || encode(extensions.gen_random_bytes(24), 'hex');
+begin
+  if (select auth.uid()) is null then raise exception 'Sign in first.' using errcode = '42501'; end if;
+  insert into public.link_keys (user_id, label, key_hash)
+  values ((select auth.uid()), coalesce(nullif(btrim(p_label), ''), 'Linked app'), encode(sha256(convert_to(v_key, 'UTF8')), 'hex'));
+  return v_key;
+end $$;
+revoke execute on function public.create_link_key(text) from public, anon;
+grant execute on function public.create_link_key(text) to authenticated;
+
+/* ------------------------------------------------------------
+   Linked apps
+   ------------------------------------------------------------ */
+
+-- Which sessions a linked app wrote. Private: nobody can tell from the
+-- shared tables how anyone's time got there.
+create table private.linked_sessions (id uuid primary key);
+alter table private.linked_sessions enable row level security;
+revoke all on private.linked_sessions from public, anon, authenticated;
+
+-- The one call a linked app makes. Applies what it sends for the key's
+-- owner (sessions to upsert or remove, and the running timer), then returns
+-- that owner's timer, recent sessions and their crew's stats. It runs as
+-- definer because a linked app has no user session: the link key is the
+-- only authority, and every write is pinned to the key's owner.
+create or replace function public.link_sync(p_key text, p_payload jsonb default '{}'::jsonb)
+returns jsonb
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_user uuid;
+  v_item jsonb;
+  v_live jsonb := p_payload->'live';
+  v_tz text := coalesce(nullif(p_payload->>'tz', ''), 'Europe/London');
+  v_since timestamptz := coalesce((p_payload->>'since')::timestamptz, now() - interval '30 days');
+  v_gone uuid[];
+  v_skipped jsonb := '[]'::jsonb;
+begin
+  update public.link_keys set last_used_at = now()
+  where key_hash = encode(sha256(convert_to(coalesce(p_key, ''), 'UTF8')), 'hex')
+  returning user_id into v_user;
+  if v_user is null then raise exception 'That link key isn''t valid. Make a new one in Locked In.' using errcode = '28000'; end if;
+
+  for v_item in select * from jsonb_array_elements(coalesce(p_payload->'upsert', '[]'::jsonb)) loop
+    begin
+      insert into public.sessions as s (id, user_id, subject, started_at, ended_at, location)
+      values ((v_item->>'id')::uuid, v_user, btrim(v_item->>'subject'), (v_item->>'started_at')::timestamptz,
+              (v_item->>'ended_at')::timestamptz, v_item->>'location')
+      on conflict (id) do update
+        set subject = excluded.subject, started_at = excluded.started_at, ended_at = excluded.ended_at, location = excluded.location
+        where s.user_id = v_user;
+      -- FOUND is false when the id belongs to someone else and nothing changed.
+      if found and coalesce(v_item->>'origin', 'linked') = 'linked' then
+        insert into private.linked_sessions (id) values ((v_item->>'id')::uuid) on conflict do nothing;
+      end if;
+    exception when others then
+      -- One bad session (an overlap, say) mustn't stop the rest syncing.
+      v_skipped := v_skipped || jsonb_build_object('id', v_item->>'id', 'reason', sqlerrm);
+    end;
+  end loop;
+
+  -- Sessions the linked app deleted go here too, only ever the key owner's.
+  select coalesce(array_agg(value::uuid), '{}') into v_gone
+  from jsonb_array_elements_text(coalesce(p_payload->'delete', '[]'::jsonb));
+  delete from public.sessions where user_id = v_user and id = any(v_gone);
+  delete from private.linked_sessions k where k.id = any(v_gone) and not exists (select 1 from public.sessions s where s.id = k.id);
+
+  if p_payload ? 'live' then
+    if v_live is null or jsonb_typeof(v_live) = 'null' then
+      update public.live set session_id = null, subject = null, started_at = null, location = null where user_id = v_user;
+    else
+      insert into public.live as l (user_id, session_id, subject, started_at, location)
+      values (v_user, (v_live->>'session_id')::uuid, btrim(v_live->>'subject'), (v_live->>'started_at')::timestamptz, v_live->>'location')
+      on conflict (user_id) do update
+        set session_id = excluded.session_id, subject = excluded.subject, started_at = excluded.started_at, location = excluded.location;
+      if coalesce(v_live->>'origin', 'linked') = 'linked' then
+        insert into private.linked_sessions (id) values ((v_live->>'session_id')::uuid) on conflict do nothing;
+      end if;
+    end if;
+  end if;
+
+  return jsonb_build_object(
+    'me', (select jsonb_build_object('id', p.id, 'name', p.name, 'emoji', p.emoji, 'share_location', p.share_location) from public.profiles p where p.id = v_user),
+    'live', (select jsonb_build_object('session_id', l.session_id, 'subject', l.subject, 'started_at', l.started_at, 'location', l.location,
+                                       'origin', case when exists (select 1 from private.linked_sessions k where k.id = l.session_id) then 'linked' else 'app' end)
+             from public.live l where l.user_id = v_user and l.started_at is not null),
+    'sessions', coalesce((select jsonb_agg(jsonb_build_object('id', s.id, 'subject', s.subject, 'started_at', s.started_at, 'ended_at', s.ended_at, 'location', s.location, 'updated_at', s.updated_at,
+                                                              'origin', case when exists (select 1 from private.linked_sessions k where k.id = s.id) then 'linked' else 'app' end) order by s.started_at)
+                          from public.sessions s where s.user_id = v_user and s.started_at >= v_since), '[]'::jsonb),
+    'crew', coalesce((select jsonb_agg(to_jsonb(st) - 'days') from private.stats_for(v_user, v_tz) st), '[]'::jsonb),
+    'skipped', v_skipped
+  );
+end $$;
+revoke execute on function public.link_sync(text, jsonb) from public;
+grant execute on function public.link_sync(text, jsonb) to anon, authenticated;
+
+/* ------------------------------------------------------------
+   Realtime, and crews nobody is left in
+   ------------------------------------------------------------ */
+
+alter publication supabase_realtime add table public.live, public.sessions, public.pings;
+
+-- A crew with nobody left in it goes too, so its invite code stops working.
+create function private.drop_empty_crew()
+returns trigger
+language plpgsql security definer set search_path = ''
+as $$
+begin
+  delete from public.crews c
+  where c.id = old.crew_id and not exists (select 1 from public.crew_members m where m.crew_id = old.crew_id);
+  return null;
+end $$;
+revoke execute on function private.drop_empty_crew() from public, anon, authenticated;
+create trigger crew_members_drop_empty after delete on public.crew_members
+  for each row execute function private.drop_empty_crew();

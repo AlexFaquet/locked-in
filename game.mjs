@@ -94,5 +94,5 @@ export function ago(iso, now = new Date()) {
   return days === 1 ? "yesterday" : `${days}d ago`;
 }
 
-/** Turns the Alfred connection into one pasteable code: project URL, publishable key and link key. */
-export const encodeAlfredCode = ({ url, key, link }) => btoa(JSON.stringify({ u: url, k: key, l: link })).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+/** A linked app's connection as one pasteable code: project URL, publishable key and link key. */
+export const encodeLinkCode = ({ url, key, link }) => btoa(JSON.stringify({ u: url, k: key, l: link })).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");

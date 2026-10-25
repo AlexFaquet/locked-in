@@ -6,7 +6,7 @@
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/+esm";
 import { SUPABASE_URL, SUPABASE_KEY } from "./config.js";
-import { levelProgress, streakFrom, badgesFor, standings, chaseLine, hm, clock, untilReset, ago, localDay, encodeAlfredCode } from "./game.mjs";
+import { levelProgress, streakFrom, badgesFor, standings, chaseLine, hm, clock, untilReset, ago, localDay, encodeLinkCode } from "./game.mjs";
 
 const db = createClient(SUPABASE_URL, SUPABASE_KEY);
 const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/London";
@@ -15,6 +15,9 @@ const MIN_SESSION_MS = 60000;
 const MAX_SESSION_MS = 16 * 3600000;
 const JOIN_KEY = "lockedin.join";
 const TAB_KEY = "lockedin.tab";
+// Linking another app is for whoever asks for it: open the app once with
+// ?link and that browser shows the option. Nobody else sees it.
+const LINKING_KEY = "lockedin.linking";
 
 const state = {
   user: null, me: null, crews: [], people: [], live: null, feed: [], mine: [], keys: [],
@@ -210,11 +213,11 @@ function shareInvite(crew) {
 const app = () => document.getElementById("app");
 
 async function boot() {
-  const join = new URLSearchParams(location.search).get("join");
-  if (join) {
-    try { sessionStorage.setItem(JOIN_KEY, join.toUpperCase()); } catch (_) {}
-    history.replaceState({}, "", location.pathname);
-  }
+  const params = new URLSearchParams(location.search);
+  const join = params.get("join");
+  if (join) try { sessionStorage.setItem(JOIN_KEY, join.toUpperCase()); } catch (_) {}
+  if (params.has("link")) store(LINKING_KEY, "1");
+  if (join || params.has("link")) history.replaceState({}, "", location.pathname);
   const { data } = await db.auth.getSession();
   state.user = data.session?.user || null;
   if (!state.user) return welcome();
@@ -250,9 +253,9 @@ async function refresh() {
   const uid = state.user.id;
   const [stats, live, feed, mine, keys] = await Promise.all([
     db.rpc("room_stats", { p_tz: TZ }),
-    db.from("live").select("*").eq("user_id", uid).maybeSingle(),
+    db.from("live").select("session_id, subject, started_at, location").eq("user_id", uid).maybeSingle(),
     db.from("sessions").select("id, user_id, subject, started_at, ended_at, location").order("ended_at", { ascending: false }).limit(25),
-    db.from("sessions").select("id, subject, started_at, ended_at, location, origin").eq("user_id", uid).order("started_at", { ascending: false }).limit(40),
+    db.from("sessions").select("id, subject, started_at, ended_at, location").eq("user_id", uid).order("started_at", { ascending: false }).limit(40),
     db.from("link_keys").select("id, label, created_at, last_used_at").order("created_at"),
     loadCrews(),
   ]);
@@ -299,7 +302,7 @@ function subscribe() {
 async function lockIn() {
   const subject = state.subject.trim();
   if (!subject) return toast("What are you studying? Add a subject first.", { bad: true });
-  const row = { user_id: state.user.id, session_id: crypto.randomUUID(), subject, started_at: new Date().toISOString(), location: state.place.trim() || null, origin: "app" };
+  const row = { user_id: state.user.id, session_id: crypto.randomUUID(), subject, started_at: new Date().toISOString(), location: state.place.trim() || null };
   const { error } = await db.from("live").upsert(row, { onConflict: "user_id" });
   if (error) return oops(error);
   state.live = row;
@@ -316,10 +319,10 @@ async function finish({ discard = false, end = new Date() } = {}) {
   if (!discard && length > MAX_SESSION_MS) return askWhenStopped();
   const levelBefore = levelProgress(byId(state.user.id)?.total_minutes || 0).level;
   if (!discard && length >= MIN_SESSION_MS) {
-    const { error } = await db.from("sessions").insert({ id: live.session_id, user_id: state.user.id, subject: live.subject, started_at: live.started_at, ended_at: end.toISOString(), location: live.location, origin: "app" });
+    const { error } = await db.from("sessions").insert({ id: live.session_id, user_id: state.user.id, subject: live.subject, started_at: live.started_at, ended_at: end.toISOString(), location: live.location });
     if (error) return oops(error);
   }
-  const { error } = await db.from("live").update({ session_id: null, subject: null, started_at: null, location: null, origin: null }).eq("user_id", state.user.id);
+  const { error } = await db.from("live").update({ session_id: null, subject: null, started_at: null, location: null }).eq("user_id", state.user.id);
   if (error) return oops(error);
   state.live = null;
   await refresh();
@@ -412,7 +415,6 @@ function runningCard() {
     h("div", { class: "big-clock", dataset: { since: live.started_at } }, clock(Date.now() - +new Date(live.started_at))),
     h("div", { class: "xp-tick" }, "⭐️ +", h("span", { dataset: { xpSince: live.started_at } }, "0"), " XP"),
     live.location ? h("p", { class: "running-where" }, "📍 ", live.location) : null,
-    live.origin === "alfred" ? h("p", { class: "small muted", style: { marginTop: "6px" } }, "Started from Alfred") : null,
     h("button", { class: "btn btn-big btn-block", onclick: () => finish() }, "✓ Done"),
     h("div", { class: "running-foot" }, h("button", { class: "link", onclick: () => finish({ discard: true }) }, "Cancel without saving")));
 }
@@ -494,7 +496,7 @@ function meView() {
     h("section", { class: "section" },
       h("div", { class: "section-head" }, h("h2", null, "Your sessions"), h("button", { class: "btn btn-small btn-soft", onclick: logSession }, "+ Log one")),
       h("div", { class: "card" }, state.mine.length ? state.mine.slice(0, 20).map((s) => h("div", { class: "session-row" },
-        h("div", null, h("p", null, s.subject), h("small", null, [`${new Date(s.started_at).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })} ${timeOf(s.started_at)}–${timeOf(s.ended_at)}`, s.location, s.origin === "alfred" ? "via Alfred" : null].filter(Boolean).join(" · "))),
+        h("div", null, h("p", null, s.subject), h("small", null, [`${new Date(s.started_at).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })} ${timeOf(s.started_at)}–${timeOf(s.ended_at)}`, s.location].filter(Boolean).join(" · "))),
         h("strong", { class: "feed-time" }, hm(minutesBetween(s.started_at, s.ended_at))),
         h("button", { class: "x", "aria-label": `Delete ${s.subject} session`, onclick: () => removeSession(s) }, "✕"))) : h("p", { class: "empty" }, "Your sessions show up here."))),
     settingsCard(),
@@ -539,12 +541,7 @@ function settingsCard() {
       h("div", { class: "crew-actions" },
         h("button", { class: "btn btn-small", onclick: () => shareInvite(c) }, "Invite"),
         h("button", { class: "link", onclick: () => leaveCrew(c) }, "Leave"))))),
-    h("div", { class: "section-head", style: { marginTop: "26px" } }, h("h2", null, "Alfred")),
-    h("div", { class: "card" },
-      h("p", { class: "small" }, "Connect Alfred to sync your timers both ways and let Alfred see your crew. Only you can link your own account."),
-      state.keys.map((k) => h("div", { class: "setting" }, h("div", null, h("strong", null, k.label), h("small", null, k.last_used_at ? `Last synced ${ago(k.last_used_at)}` : "Not used yet")),
-        h("button", { class: "link", onclick: () => revokeKey(k) }, "Disconnect"))),
-      h("button", { class: "btn btn-small btn-soft", style: { marginTop: "12px" }, onclick: makeAlfredCode }, state.keys.length ? "Make a new code" : "Connect Alfred")),
+    linkingCard(),
     h("div", { class: "card", style: { marginTop: "16px" } },
       h("p", { class: "small muted" }, "Your account lives in this browser. Clearing site data or switching phones starts a new one — add Locked In to your home screen (Share → Add to Home Screen) so it sticks."),
       h("button", { class: "link", style: { color: "var(--danger)", marginTop: "8px" }, onclick: deleteEverything }, "Delete my account and sessions")));
@@ -553,6 +550,19 @@ function settingsCard() {
 /* ------------------------------------------------------------
    Sheets
    ------------------------------------------------------------ */
+
+/** Only on a browser that opened ?link, or that already has a link. */
+function linkingCard() {
+  if (readStored(LINKING_KEY) !== "1" && !state.keys.length) return null;
+  return [
+    h("div", { class: "section-head", style: { marginTop: "26px" } }, h("h2", null, "Linked app")),
+    h("div", { class: "card" },
+      h("p", { class: "small" }, "Sync your timers with another app of yours, both ways. A link can only ever act as you."),
+      state.keys.map((k) => h("div", { class: "setting" }, h("div", null, h("strong", null, k.label), h("small", null, k.last_used_at ? `Last synced ${ago(k.last_used_at)}` : "Not used yet")),
+        h("button", { class: "link", onclick: () => revokeKey(k) }, "Unlink"))),
+      h("button", { class: "btn btn-small btn-soft", style: { marginTop: "12px" }, onclick: makeLinkCode }, state.keys.length ? "Make a new code" : "Link an app")),
+  ];
+}
 
 function editProfile() {
   let emoji = state.me.emoji;
@@ -606,7 +616,7 @@ function logSession() {
         const start = new Date(`${day.value}T${from.value}:00`);
         let end = new Date(`${day.value}T${to.value}:00`);
         if (end <= start) end.setDate(end.getDate() + 1);
-        const { error } = await db.from("sessions").insert({ user_id: state.user.id, subject: subject.value.trim(), started_at: start.toISOString(), ended_at: end.toISOString(), origin: "app" });
+        const { error } = await db.from("sessions").insert({ user_id: state.user.id, subject: subject.value.trim(), started_at: start.toISOString(), ended_at: end.toISOString() });
         if (error) return oops(error.message.includes("sessions_no_overlap") ? { message: "That overlaps a session you already have." } : error);
         close(); await refresh(); render(); toast(`+${Math.round((end - start) / 60000)} XP logged ⭐️`);
       } }, "Save"))));
@@ -619,20 +629,20 @@ async function removeSession(session) {
   await refresh(); render();
 }
 
-async function makeAlfredCode() {
-  const { data: link, error } = await db.rpc("create_link_key", { p_label: "Alfred" });
+async function makeLinkCode() {
+  const { data: link, error } = await db.rpc("create_link_key");
   if (error) return oops(error);
-  const code = encodeAlfredCode({ url: SUPABASE_URL, key: SUPABASE_KEY, link });
+  const code = encodeLinkCode({ url: SUPABASE_URL, key: SUPABASE_KEY, link });
   await refresh(); render();
   sheet((box, close) => box.append(
-    h("h2", null, "Your Alfred code 🤖"),
-    h("p", { class: "muted", style: { marginTop: "6px" } }, "Paste it into Alfred → Study → Locked In. It's shown once — anyone with it can log time as you, so keep it to yourself."),
+    h("h2", null, "Your link code 🔗"),
+    h("p", { class: "muted", style: { marginTop: "6px" } }, "Paste it into the app you're linking. It's shown once — anyone with it can log time as you, so keep it to yourself."),
     h("div", { class: "code-box" }, code),
-    h("div", { class: "btn-row" }, h("button", { class: "btn btn-soft", onclick: close }, "Done"), h("button", { class: "btn", onclick: () => copy(code, "Code copied — paste it into Alfred.") }, "Copy code"))));
+    h("div", { class: "btn-row" }, h("button", { class: "btn btn-soft", onclick: close }, "Done"), h("button", { class: "btn", onclick: () => copy(code, "Code copied.") }, "Copy code"))));
 }
 
 async function revokeKey(key) {
-  if (!confirm("Disconnect this Alfred? It stops syncing straight away.")) return;
+  if (!confirm("Unlink this app? It stops syncing straight away.")) return;
   const { error } = await db.from("link_keys").delete().eq("id", key.id);
   if (error) return oops(error);
   await refresh(); render();

@@ -27,8 +27,8 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
 
 ## The database
 
-Supabase project `locked-in` (London). The schema is in
-[`supabase/migrations`](supabase/migrations); every table has row-level
+Supabase project `locked-in` (London). The whole schema is in
+[`supabase/schema.sql`](supabase/schema.sql); every table has row-level
 security:
 
 | Table | Who sees it | Who changes it |
@@ -54,22 +54,18 @@ the caller's own membership.
 `config.js` holds the project URL and the **publishable** key. They're meant
 to be public; what anyone can do is decided by the rules above.
 
-## Alfred
+## Linking another app
 
-Alfred (Alex's dashboard) can sync with one account. In the app, Me → Alfred
-→ *Connect Alfred* makes a code holding the project URL, the publishable key
-and a link key. Paste it into Alfred's Study tab. Alfred then calls
-`link_sync(key, payload)` about once a minute. The function finds the key's
-owner by its SHA-256 and acts only for them:
+An app of your own can sync with your account. Open Locked In once with
+`?link` on the end of the address and Me shows **Linked app**. *Link an app*
+makes a code holding the project URL, the publishable key and a link key;
+paste it into the other app. That app then calls `link_sync(key, payload)`,
+which finds the key's owner by its SHA-256 and acts only for them: it can add,
+change and remove that person's sessions and running timer, and read their
+crew's board. *Unlink* revokes the key immediately.
 
-- Alfred's study timers and sessions appear here, under Alfred's category
-  names (MT3501 …).
-- Sessions and timers started here appear in Alfred when the subject matches
-  one of Alfred's categories.
-- Deleting or stopping on either side does the same on the other. If both
-  sides start a timer at once, the later one wins.
-
-Disconnecting in the app revokes the key immediately.
+Which sessions came through a link is kept in a private table that only
+`link_sync` reads, so crewmates can't tell how anyone's time got there.
 
 ## Developing
 
@@ -80,6 +76,6 @@ python3 -m http.server 8766
 node --test tests/*.test.mjs   # levels, streaks, badges, the board
 ```
 
-The migration containing `link_sync` was run in the dashboard's SQL editor,
-because the Supabase MCP tool refuses migrations that contain `DELETE`, so it
-isn't in the project's migration history.
+`supabase/schema.sql` is what the project has now. It was applied in parts,
+some through the dashboard's SQL editor, so the project's migration history
+doesn't list all of it.

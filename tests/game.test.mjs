@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { levelFor, levelProgress, minutesForLevel, streakFrom, badgesFor, standings, chaseLine, hm, clock, untilReset, encodeAlfredCode } from "../game.mjs";
+import { levelFor, levelProgress, minutesForLevel, streakFrom, badgesFor, standings, chaseLine, hm, clock, untilReset, encodeLinkCode } from "../game.mjs";
 
 test("levels get steeper and the bar measures progress inside one", () => {
   assert.deepEqual([0, 149, 150, 599, 600, 2400, 12150].map(levelFor), [1, 1, 2, 2, 3, 5, 10]);
@@ -39,6 +39,6 @@ test("formatting", () => {
   assert.equal(clock(3729000), "1:02:09");
   assert.equal(untilReset(new Date(2026, 9, 25, 22, 30)), "1h 30m", "Sunday night: resets at midnight");
   assert.equal(untilReset(new Date(2026, 9, 26, 0, 0)), "7d 0h", "Monday at midnight: a whole week to go");
-  const code = encodeAlfredCode({ url: "https://x.supabase.co", key: "sb_publishable_1", link: "li_abc" });
+  const code = encodeLinkCode({ url: "https://x.supabase.co", key: "sb_publishable_1", link: "li_abc" });
   assert.deepEqual(JSON.parse(Buffer.from(code.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString()), { u: "https://x.supabase.co", k: "sb_publishable_1", l: "li_abc" });
 });
