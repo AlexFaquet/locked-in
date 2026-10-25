@@ -297,3 +297,24 @@ p { margin: 0; }
 /* ---------- pairing ---------- */
 .pair-code { margin-top: 18px; text-align: center; font-size: 44px; letter-spacing: .12em; }
 .pair-input { text-align: center; font: 600 30px var(--display); letter-spacing: .2em; text-transform: uppercase; }
+
+/* ---------- modules ----------
+   Eight colour slots, fixed per module when it's added. Validated as a set
+   on both card surfaces; light 3, 4 and 5 sit under 3:1, so every module's
+   name and hours are always printed beside its colour. */
+:root { --m0: #2a78d6; --m1: #eb6834; --m2: #1baf7a; --m3: #eda100; --m4: #e87ba4; --m5: #008300; --m6: #6250d6; --m7: #e34948; }
+@media (prefers-color-scheme: dark) {
+  :root { --m0: #3987e5; --m1: #d95926; --m2: #199e70; --m3: #c98500; --m4: #d55181; --m5: #008300; --m6: #9085e9; --m7: #e66767; }
+}
+.module-dot { display: inline-block; flex: none; width: 10px; height: 10px; border-radius: 50%; }
+.module-chip { display: inline-flex; align-items: center; gap: 8px; }
+.chip-add { border-style: dashed; color: var(--primary); box-shadow: none; }
+.timer-card .module-chips { margin: 16px 0 6px; }
+.module-chips { margin-top: 14px; }
+.empty-modules { margin-top: 14px; display: grid; gap: 12px; justify-items: start; }
+.module-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px 0; border-top: 2px solid var(--line); }
+.module-row:first-child { border-top: 0; }
+.module-main strong { display: flex; align-items: center; gap: 8px; font: 600 17px var(--display); }
+.module-main strong span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.module-main small { display: block; color: var(--muted); font-weight: 700; margin-top: 2px; }
+.module-actions { display: flex; gap: 6px; }

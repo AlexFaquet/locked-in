@@ -586,3 +586,135 @@ begin
 end $$;
 revoke execute on function public.redeem_pairing_code(text) from public, anon, authenticated;
 grant execute on function public.redeem_pairing_code(text) to service_role;
+
+/* ------------------------------------------------------------
+   Modules: each person's own list
+   ------------------------------------------------------------ */
+
+-- Nothing is assumed; you add yours. Private to you. Sessions keep the
+-- module's name, so the board and feed are unchanged.
+create table public.subjects (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references public.profiles (id) on delete cascade,
+  name text not null check (char_length(btrim(name)) between 1 and 40),
+  -- A colour slot, fixed when the module is added, so it never changes meaning.
+  color smallint not null default 0 check (color between 0 and 7),
+  archived boolean not null default false,
+  created_at timestamptz not null default now()
+);
+create unique index subjects_user_name_idx on public.subjects (user_id, lower(btrim(name)));
+
+alter table public.subjects enable row level security;
+create policy "see your own modules" on public.subjects for select to authenticated
+  using (user_id = (select auth.uid()));
+create policy "add your own modules" on public.subjects for insert to authenticated
+  with check (user_id = (select auth.uid()));
+create policy "change your own modules" on public.subjects for update to authenticated
+  using (user_id = (select auth.uid())) with check (user_id = (select auth.uid()));
+revoke all on public.subjects from anon, authenticated;
+grant select, insert, update on public.subjects to authenticated;
+
+-- The next colour slot for a person: the first unused, then round again.
+create function private.next_subject_color(p_user uuid)
+returns smallint
+language sql stable security definer set search_path = ''
+as $$
+  select coalesce(
+    (select min(slot) from generate_series(0, 7) as slot where slot not in (select color from public.subjects where user_id = p_user and not archived)),
+    ((select count(*) from public.subjects where user_id = p_user) % 8)
+  )::smallint
+$$;
+revoke execute on function private.next_subject_color(uuid) from public, anon;
+grant execute on function private.next_subject_color(uuid) to authenticated;
+
+create function private.subject_color_default()
+returns trigger
+language plpgsql security definer set search_path = ''
+as $$
+begin
+  if tg_op = 'INSERT' then new.color := private.next_subject_color(new.user_id); end if;
+  new.name := btrim(new.name);
+  return new;
+end $$;
+revoke execute on function private.subject_color_default() from public, anon, authenticated;
+create trigger subjects_defaults before insert or update on public.subjects
+  for each row execute function private.subject_color_default();
+
+-- Anything you study becomes one of your modules, wherever the timer ran,
+-- so a session from another device or a linked app joins the list.
+create function private.remember_subject()
+returns trigger
+language plpgsql security definer set search_path = ''
+as $$
+begin
+  if new.subject is not null then
+    insert into public.subjects (user_id, name) values (new.user_id, btrim(new.subject))
+    on conflict (user_id, (lower(btrim(name)))) do nothing;
+  end if;
+  return new;
+end $$;
+revoke execute on function private.remember_subject() from public, anon, authenticated;
+create trigger sessions_remember_subject after insert or update of subject on public.sessions
+  for each row execute function private.remember_subject();
+create trigger live_remember_subject after insert or update of subject on public.live
+  for each row execute function private.remember_subject();
+
+-- A module added by mistake can go, as long as no time was ever logged to it.
+-- Anything with history is archived instead, so its hours keep their name.
+create function private.subject_unused(p_user uuid, p_name text)
+returns boolean
+language sql stable security definer set search_path = ''
+as $$
+  select not exists (select 1 from public.sessions where user_id = p_user and lower(btrim(subject)) = lower(btrim(p_name)))
+     and not exists (select 1 from public.live where user_id = p_user and lower(btrim(subject)) = lower(btrim(p_name)))
+$$;
+revoke execute on function private.subject_unused(uuid, text) from public, anon;
+grant execute on function private.subject_unused(uuid, text) to authenticated;
+create policy "remove your own unused modules" on public.subjects for delete to authenticated
+  using (user_id = (select auth.uid()) and (select private.subject_unused(user_id, name)));
+grant delete on public.subjects to authenticated;
+
+-- Renaming a module renames your past sessions with it, so its hours stay together.
+create function public.rename_subject(p_id uuid, p_name text)
+returns public.subjects
+language plpgsql security invoker set search_path = ''
+as $$
+declare
+  v_old text;
+  v_row public.subjects;
+begin
+  select name into v_old from public.subjects where id = p_id and user_id = (select auth.uid());
+  if v_old is null then raise exception 'That module no longer exists.' using errcode = 'P0002'; end if;
+  begin
+    update public.subjects set name = p_name where id = p_id returning * into v_row;
+  exception when unique_violation then
+    raise exception 'You already have a module called %.', btrim(p_name) using errcode = '23505';
+  end;
+  update public.sessions set subject = v_row.name where user_id = (select auth.uid()) and lower(btrim(subject)) = lower(v_old);
+  update public.live set subject = v_row.name where user_id = (select auth.uid()) and lower(btrim(subject)) = lower(v_old);
+  return v_row;
+end $$;
+revoke execute on function public.rename_subject(uuid, text) from public, anon;
+grant execute on function public.rename_subject(uuid, text) to authenticated;
+
+-- Hours per module, for your own breakdown: this week and all time.
+create function public.my_subject_stats(p_tz text default 'Europe/London')
+returns table (subject_id uuid, name text, color smallint, archived boolean, week_minutes integer, total_minutes integer, last_studied timestamptz)
+language sql stable security invoker set search_path = ''
+as $$
+  with bounds as (select (date_trunc('week', now() at time zone p_tz)) at time zone p_tz as week_start),
+  timed as (
+    select s.subject, s.started_at, s.ended_at from public.sessions s where s.user_id = (select auth.uid())
+    union all
+    select l.subject, l.started_at, greatest(now(), l.started_at) from public.live l where l.user_id = (select auth.uid()) and l.started_at is not null
+  )
+  select m.id, m.name, m.color, m.archived,
+    coalesce((select round(sum(extract(epoch from least(t.ended_at, now()) - greatest(t.started_at, b.week_start))) / 60) from timed t where lower(btrim(t.subject)) = lower(m.name) and t.ended_at > b.week_start), 0)::integer,
+    coalesce((select round(sum(extract(epoch from t.ended_at - t.started_at)) / 60) from timed t where lower(btrim(t.subject)) = lower(m.name)), 0)::integer,
+    (select max(t.ended_at) from timed t where lower(btrim(t.subject)) = lower(m.name))
+  from public.subjects m cross join bounds b
+  where m.user_id = (select auth.uid())
+  order by m.archived, m.created_at
+$$;
+revoke execute on function public.my_subject_stats(text) from public, anon;
+grant execute on function public.my_subject_stats(text) to authenticated;

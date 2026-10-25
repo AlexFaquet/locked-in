@@ -17,7 +17,12 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
 - **Crews are invite-only.** You see yourself and the people who share a
   crew with you, nobody else. Start a crew to get an eight-character code, or
   open someone's invite link (`?join=CODE`).
-- **Lock in** on a subject, optionally saying where. Your crew sees you live,
+- **Your own modules.** After joining a crew you add what you study: course
+  names, codes, anything. Nothing is assumed, and only you see the list. Me →
+  *Your modules* shows hours this week and all time per module, and renames
+  or archives them. Renaming also renames past sessions, so the hours stay
+  together. A module with no time logged can be removed outright.
+- **Lock in** on one of your modules, optionally saying where. Your crew sees you live,
   with a ticking clock, and can tap *I'm coming* or *Hype*. You get a toast,
   and a notification if you've turned them on while the app is open.
 - **Earn XP** — a point a minute. Levels get steeper (Level 2 at 2.5 hours,
@@ -41,6 +46,7 @@ security:
 | `sessions` | you and your crewmates | you |
 | `live` | you and your crewmates | you |
 | `pings` | sender and recipient | the sender, two minutes apart per kind |
+| `subjects` (your modules) | you | you; unused ones can be removed, the rest archived |
 | `link_keys` | you (never the key itself) | you |
 
 Pairing a device: `create_pairing_code()` stores a hash of a one-time code,

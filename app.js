@@ -18,9 +18,10 @@ const TAB_KEY = "lockedin.tab";
 // Linking another app is for whoever asks for it: open the app once with
 // ?link and that browser shows the option. Nobody else sees it.
 const LINKING_KEY = "lockedin.linking";
+const SKIPPED_MODULES_KEY = "lockedin.skippedModules";
 
 const state = {
-  user: null, me: null, crews: [], people: [], live: null, feed: [], mine: [], keys: [],
+  user: null, me: null, crews: [], people: [], live: null, feed: [], mine: [], keys: [], modules: [],
   tab: readStored(TAB_KEY) || "now", board: "week", subject: "", place: "",
 };
 let channel = null;
@@ -240,8 +241,34 @@ async function afterProfile() {
 async function enter() {
   await refresh();
   subscribe();
+  if (!state.modules.length && readStored(SKIPPED_MODULES_KEY) !== "1") return modulesStep();
   render();
   scrollTo({ top: 0 });
+}
+
+/** First run: your own modules. Nothing is assumed; skip and add them later if you like. */
+function modulesStep() {
+  const list = h("div", { class: "chips module-chips" });
+  const input = h("input", { id: "m-name", class: "input", maxlength: 40, placeholder: "Module name or code", autocomplete: "off" });
+  const paint = () => list.replaceChildren(...activeModules().map((m) => h("span", { class: "chip module-chip" }, dot(m), m.name)));
+  const done = h("button", { class: "btn btn-big btn-block", type: "button", onclick: () => { render(); scrollTo({ top: 0 }); } }, "Let's go →");
+  app().replaceChildren(h("main", { class: "welcome" },
+    h("div", { class: "welcome-lock", "aria-hidden": "true" }, "📚"),
+    h("h1", null, "What are you studying?"),
+    h("p", null, "Add your modules — course names, codes, anything you want to time. Only you see this list, and you can change it any time."),
+    h("div", { class: "step card" },
+      h("form", { onsubmit: async (ev) => {
+        ev.preventDefault();
+        if (await addModule(input.value)) { input.value = ""; paint(); input.focus(); done.disabled = false; }
+      } },
+        h("label", { class: "label", for: "m-name" }, "Add a module"),
+        h("div", { class: "row" }, input, h("button", { class: "btn", type: "submit" }, "Add"))),
+      list,
+      h("div", { style: { marginTop: "22px" } }, done)),
+    h("button", { class: "link", style: { marginTop: "14px" }, onclick: () => { store(SKIPPED_MODULES_KEY, "1"); render(); scrollTo({ top: 0 }); } }, "Skip for now")));
+  done.disabled = !activeModules().length;
+  paint();
+  input.focus();
 }
 
 async function loadCrews() {
@@ -252,21 +279,93 @@ async function loadCrews() {
 
 async function refresh() {
   const uid = state.user.id;
-  const [stats, live, feed, mine, keys] = await Promise.all([
+  const [stats, live, feed, mine, keys, modules] = await Promise.all([
     db.rpc("room_stats", { p_tz: TZ }),
     db.from("live").select("session_id, subject, started_at, location").eq("user_id", uid).maybeSingle(),
     db.from("sessions").select("id, user_id, subject, started_at, ended_at, location").order("ended_at", { ascending: false }).limit(25),
     db.from("sessions").select("id, subject, started_at, ended_at, location").eq("user_id", uid).order("started_at", { ascending: false }).limit(40),
     db.from("link_keys").select("id, label, created_at, last_used_at").order("created_at"),
+    db.rpc("my_subject_stats", { p_tz: TZ }),
     loadCrews(),
   ]);
-  const failed = [stats, live, feed, mine, keys].find((r) => r.error);
+  const failed = [stats, live, feed, mine, keys, modules].find((r) => r.error);
   if (failed) return oops(failed.error, "Couldn't load your crew.");
   state.people = stats.data || [];
   state.live = live.data?.started_at ? live.data : null;
   state.feed = feed.data || [];
   state.mine = mine.data || [];
   state.keys = keys.data || [];
+  state.modules = modules.data || [];
+}
+
+/* ------------------------------------------------------------
+   Modules — everyone's own list
+   ------------------------------------------------------------ */
+
+const activeModules = () => state.modules.filter((m) => !m.archived);
+const dot = (m) => h("i", { class: "module-dot", style: { background: `var(--m${m?.color ?? 0})` }, "aria-hidden": "true" });
+const moduleNamed = (name) => state.modules.find((m) => m.name.toLowerCase() === String(name).trim().toLowerCase());
+
+async function reloadModules() {
+  const { data, error } = await db.rpc("my_subject_stats", { p_tz: TZ });
+  if (!error) state.modules = data || [];
+}
+
+/** Adds a module, or brings an archived one of the same name back. Returns it, or null. */
+async function addModule(raw) {
+  const name = String(raw || "").trim();
+  if (!name) { toast("Give the module a name.", { bad: true }); return null; }
+  const existing = moduleNamed(name);
+  if (existing && !existing.archived) { toast(`You already have ${existing.name}.`); return existing; }
+  const { error } = existing
+    ? await db.from("subjects").update({ archived: false }).eq("id", existing.subject_id)
+    : await db.from("subjects").insert({ user_id: state.user.id, name });
+  if (error) { oops(error.code === "23505" ? { message: `You already have ${name}.` } : error); return null; }
+  await reloadModules();
+  return moduleNamed(name);
+}
+
+function addModuleSheet(onAdded) {
+  const input = h("input", { id: "add-module", class: "input", maxlength: 40, placeholder: "Module name or code", autocomplete: "off" });
+  sheet((box, close) => box.append(
+    h("h2", null, "Add a module"),
+    h("form", { style: { marginTop: "14px" }, onsubmit: async (ev) => {
+      ev.preventDefault();
+      const added = await addModule(input.value);
+      if (!added) return;
+      close();
+      onAdded?.(added);
+      render();
+    } }, input, h("div", { class: "btn-row" }, h("button", { class: "btn btn-soft", type: "button", onclick: close }, "Cancel"), h("button", { class: "btn", type: "submit" }, "Add")))));
+}
+
+function renameModule(m) {
+  const input = h("input", { class: "input", maxlength: 40, value: m.name });
+  sheet((box, close) => box.append(
+    h("h2", null, `Rename ${m.name}`),
+    h("p", { class: "muted", style: { marginTop: "6px" } }, "Your past sessions are renamed too, so the hours stay together."),
+    h("form", { style: { marginTop: "14px" }, onsubmit: async (ev) => {
+      ev.preventDefault();
+      const { error } = await db.rpc("rename_subject", { p_id: m.subject_id, p_name: input.value.trim() });
+      if (error) return oops(error);
+      if (state.subject.trim().toLowerCase() === m.name.toLowerCase()) state.subject = input.value.trim();
+      close(); await refresh(); render(); toast("Renamed.");
+    } }, input, h("div", { class: "btn-row" }, h("button", { class: "btn btn-soft", type: "button", onclick: close }, "Cancel"), h("button", { class: "btn", type: "submit" }, "Save")))));
+}
+
+async function archiveModule(m, archived) {
+  // A module that never had any time can simply go; one with history keeps its name in an archive.
+  if (archived && !m.total_minutes) {
+    // Row-level security turns a refused delete into "nothing deleted", not an error.
+    const { data, error } = await db.from("subjects").delete().eq("id", m.subject_id).select("id");
+    if (!error && data?.length) { await reloadModules(); render(); toast(`${m.name} removed.`); return; }
+  }
+  const { error } = await db.from("subjects").update({ archived }).eq("id", m.subject_id);
+  if (error) return oops(error);
+  if (archived && state.subject.trim().toLowerCase() === m.name.toLowerCase()) state.subject = "";
+  await reloadModules();
+  render();
+  toast(archived ? `${m.name} archived — its hours stay on your record.` : `${m.name} is back.`);
 }
 
 function refreshSoon() {
@@ -302,7 +401,7 @@ function subscribe() {
 
 async function lockIn() {
   const subject = state.subject.trim();
-  if (!subject) return toast("What are you studying? Add a subject first.", { bad: true });
+  if (!subject) return toast("Pick a module first, or add one.", { bad: true });
   const row = { user_id: state.user.id, session_id: crypto.randomUUID(), subject, started_at: new Date().toISOString(), location: state.place.trim() || null };
   const { error } = await db.from("live").upsert(row, { onConflict: "user_id" });
   if (error) return oops(error);
@@ -388,24 +487,32 @@ function nowView() {
 }
 
 function startCard() {
-  const subjects = [...new Set(state.mine.map((s) => s.subject))].slice(0, 6);
-  if (!state.subject && subjects[0]) state.subject = subjects[0];
+  const modules = activeModules();
+  // Default to whatever you studied last, if it's still one of your modules.
+  if (!modules.some((m) => m.name === state.subject)) {
+    const last = state.mine.find((s) => modules.some((m) => m.name.toLowerCase() === s.subject.toLowerCase()));
+    state.subject = last ? moduleNamed(last.subject).name : modules[0]?.name || "";
+  }
   const places = [...new Set(state.mine.map((s) => s.location).filter(Boolean))].slice(0, 6);
-  const subject = h("input", { id: "subject", class: "input", maxlength: 40, placeholder: "MT3501, essay, flashcards…", value: state.subject, oninput: (ev) => { state.subject = ev.target.value; paintChips(); } });
-  const chips = h("div", { class: "chips" });
+  const chips = h("div", { class: "chips module-chips", role: "group", "aria-label": "Your modules" });
+  const go = h("button", { class: "btn btn-big btn-live btn-block", type: "submit", style: { marginTop: "20px" }, disabled: !modules.length });
   function paintChips() {
-    chips.replaceChildren(...subjects.map((s) => h("button", { type: "button", class: "chip", "aria-pressed": String(s === state.subject.trim()), onclick: () => { state.subject = s; subject.value = s; paintChips(); } }, s)));
+    go.textContent = state.subject ? `🔒 Lock in on ${state.subject}` : "🔒 Lock in";
+    chips.replaceChildren(
+      ...modules.map((m) => h("button", { type: "button", class: "chip module-chip", "aria-pressed": String(m.name === state.subject), onclick: () => { state.subject = m.name; paintChips(); } }, dot(m), m.name)),
+      h("button", { type: "button", class: "chip chip-add", onclick: () => addModuleSheet((added) => { state.subject = added.name; }) }, "+ Add"));
   }
   paintChips();
   const place = h("input", { id: "place", class: "input", maxlength: 80, placeholder: "Main Library, café, home…", list: "places", value: state.place, oninput: (ev) => { state.place = ev.target.value; } });
   return h("form", { class: "card timer-card", onsubmit: (ev) => { ev.preventDefault(); lockIn(); } },
     h("h2", null, "What are you locking in on?"),
-    subjects.length ? chips : null,
-    h("label", { class: "field" }, h("span", { class: "label" }, "Subject"), subject),
+    modules.length ? chips : h("div", { class: "empty-modules" },
+      h("p", { class: "muted" }, "Add the modules you study, then pick one to lock in on."),
+      h("button", { type: "button", class: "btn btn-soft", onclick: () => addModuleSheet((added) => { state.subject = added.name; }) }, "+ Add a module")),
     state.me.share_location
       ? h("label", { class: "field" }, h("span", { class: "label" }, "Where (your crew sees this)"), place, h("datalist", { id: "places" }, places.map((p) => h("option", { value: p }))))
       : h("p", { class: "small muted", style: { marginTop: "12px" } }, "Location sharing is off — turn it on in Me if you want friends to find you."),
-    h("button", { class: "btn btn-big btn-live btn-block", type: "submit", style: { marginTop: "20px" } }, "🔒 Lock in"));
+    go);
 }
 
 function runningCard() {
@@ -490,6 +597,7 @@ function meView() {
         h("div", null, h("strong", null, `🔥 ${streak}`), h("span", null, "Day streak")),
         h("div", null, h("strong", null, hm(me.total_minutes)), h("span", null, "All time")),
         h("div", null, h("strong", null, hm(me.longest_minutes)), h("span", null, "Longest")))),
+    modulesCard(),
     h("section", { class: "section" }, h("div", { class: "section-head" }, h("h2", null, "Last 10 weeks")), h("div", { class: "card" }, heatmap(me.days))),
     h("section", { class: "section" },
       h("div", { class: "section-head" }, h("h2", null, "Badges"), h("small", null, `${badges.filter((b) => b.got).length}/${badges.length}`)),
@@ -502,6 +610,26 @@ function meView() {
         h("button", { class: "x", "aria-label": `Delete ${s.subject} session`, onclick: () => removeSession(s) }, "✕"))) : h("p", { class: "empty" }, "Your sessions show up here."))),
     settingsCard(),
   ];
+}
+
+/** Your modules: this week and all time, each with its own colour; rename, archive, add. */
+function modulesCard() {
+  const active = activeModules();
+  const archived = state.modules.filter((m) => m.archived);
+  const most = Math.max(1, ...active.map((m) => m.total_minutes));
+  return h("section", { class: "section" },
+    h("div", { class: "section-head" }, h("h2", null, "Your modules"), h("button", { class: "btn btn-small btn-soft", onclick: () => addModuleSheet() }, "+ Add")),
+    h("div", { class: "card" },
+      active.length ? active.map((m) => h("div", { class: "module-row" },
+        h("div", { class: "module-main" },
+          h("strong", null, dot(m), h("span", null, m.name)),
+          h("small", null, `${hm(m.week_minutes)} this week · ${hm(m.total_minutes)} all time`),
+          h("div", { class: "rank-bar" }, h("span", { style: { width: `${Math.max(3, (m.total_minutes / most) * 100)}%`, background: `var(--m${m.color})` } }))),
+        h("div", { class: "module-actions" },
+          h("button", { class: "link", "aria-label": `Rename ${m.name}`, onclick: () => renameModule(m) }, "Rename"),
+          h("button", { class: "link", "aria-label": `${m.total_minutes ? "Archive" : "Remove"} ${m.name}`, onclick: () => archiveModule(m, true) }, m.total_minutes ? "Archive" : "Remove"))))
+        : h("p", { class: "empty" }, "No modules yet. Add the ones you study — only you see them."),
+      archived.length ? h("p", { class: "small muted", style: { marginTop: "12px" } }, "Archived: ", archived.map((m, i) => [i ? ", " : "", h("button", { class: "link", style: { padding: "0" }, title: `Bring ${m.name} back`, onclick: () => archiveModule(m, false) }, m.name)])) : null));
 }
 
 function heatmap(days = {}) {
@@ -654,23 +782,24 @@ async function leaveCrew(crew) {
 }
 
 function logSession() {
-  const subjects = [...new Set(state.mine.map((s) => s.subject))];
+  const modules = activeModules();
+  if (!modules.length) return addModuleSheet(() => logSession());
   const now = new Date();
-  const subject = h("input", { class: "input", maxlength: 40, placeholder: "Subject", list: "log-subjects", value: subjects[0] || "" });
+  const subject = h("select", { class: "input" }, modules.map((m) => h("option", { value: m.name, selected: m.name === state.subject }, m.name)));
   const day = h("input", { class: "input", type: "date", value: localDay(now), max: localDay(now) });
   const from = h("input", { class: "input", type: "time", value: timeOf(new Date(+now - 3600000)) });
   const to = h("input", { class: "input", type: "time", value: timeOf(now) });
   sheet((box, close) => box.append(
     h("h2", null, "Log a session"),
     h("p", { class: "muted", style: { marginTop: "4px" } }, "For when you forgot to lock in."),
-    h("label", { class: "field" }, h("span", { class: "label" }, "Subject"), subject, h("datalist", { id: "log-subjects" }, subjects.map((s) => h("option", { value: s })))),
+    h("label", { class: "field" }, h("span", { class: "label" }, "Module"), subject),
     h("div", { class: "form-grid", style: { marginTop: "14px" } }, day, from, to),
     h("div", { class: "btn-row" }, h("button", { class: "btn btn-soft", onclick: close }, "Cancel"),
       h("button", { class: "btn", onclick: async () => {
         const start = new Date(`${day.value}T${from.value}:00`);
         let end = new Date(`${day.value}T${to.value}:00`);
         if (end <= start) end.setDate(end.getDate() + 1);
-        const { error } = await db.from("sessions").insert({ user_id: state.user.id, subject: subject.value.trim(), started_at: start.toISOString(), ended_at: end.toISOString() });
+        const { error } = await db.from("sessions").insert({ user_id: state.user.id, subject: subject.value, started_at: start.toISOString(), ended_at: end.toISOString() });
         if (error) return oops(error.message.includes("sessions_no_overlap") ? { message: "That overlaps a session you already have." } : error);
         close(); await refresh(); render(); toast(`+${Math.round((end - start) / 60000)} XP logged ⭐️`);
       } }, "Save"))));
