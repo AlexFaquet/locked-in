@@ -1,0 +1,15 @@
+{
+  "name": "Locked In",
+  "short_name": "Locked In",
+  "description": "Study with your friends. See who's locked in, race the weekly board, keep your streak.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#fff7ec",
+  "theme_color": "#5b4bff",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icon-180.png", "sizes": "180x180", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
