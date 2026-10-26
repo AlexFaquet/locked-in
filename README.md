@@ -29,6 +29,11 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
   *Resume* carries on the same clock with the same module and place. Your crew
   sees you're on a break (for up to three hours), and a pause shows on every
   device you use. *Done* from a break ends the sitting with its XP.
+- **Switch module** mid-session from the chips under the clock. The time so far
+  is saved under the module it was on and the clock carries on, so one sitting
+  can cover several modules and each still gets its hours. In the first minute
+  a switch just relabels the timer (wrong button). Resuming from a break lets
+  you pick the module too.
 - **Fix the times.** *Edit* under the running clock changes its module, when
   you really started, or where you are. In Me → *Your sessions*, ✎ changes a
   saved session's module, day and times, and *+ Log one* adds one you forgot

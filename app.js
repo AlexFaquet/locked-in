@@ -434,14 +434,14 @@ async function saveStretch(live, end) {
   return length;
 }
 
-/** The whole sitting is over: XP for all of it, and a level-up if it got you one. */
+/** The whole sitting is over: XP for all of it, and a level-up if it got you one. `subject` is null when it spanned more than one stretch. */
 async function celebrate(subject, minutes, levelBefore) {
   await refresh();
   render();
   const after = levelProgress(byId(state.user.id)?.total_minutes || 0);
   if (minutes < 1) toast("Under a minute — not counted.");
   else if (after.level > levelBefore) { confetti(["⭐️", "🎉", "🏆", "✨"]); toast(`Level up! You're Level ${after.level} — ${after.title} 🏆`, { ms: 6000 }); }
-  else { if (minutes >= 25) confetti(); toast(`+${Math.round(minutes)} XP · ${hm(minutes)} on ${subject} 💪`); }
+  else { if (minutes >= 25) confetti(); toast(`+${Math.round(minutes)} XP · ${hm(minutes)} ${subject ? `on ${subject}` : "this session"} 💪`); }
 }
 
 /** Stops the timer. Under a minute isn't kept; past 16 hours we ask when you really stopped. */
@@ -461,7 +461,8 @@ async function finish({ discard = false, end = new Date() } = {}) {
     await refresh(); render();
     return toast(banked >= 1 ? `This stretch is cancelled. The ${hm(banked)} before your break stays saved.` : "Timer cancelled.");
   }
-  await celebrate(live.subject, banked + saved / 60000, levelBefore);
+  // A sitting with breaks or switches may span modules, so it's "this session" then.
+  await celebrate(banked ? null : live.subject, banked + saved / 60000, levelBefore);
 }
 
 /** Takes a break: the stretch so far is saved, and the sitting waits for Resume. */
@@ -482,11 +483,40 @@ async function pause() {
   toast(row.banked_seconds >= 60 ? `Paused · ${hm(row.banked_seconds / 60)} saved so far ☕` : "Paused ☕");
 }
 
-/** Back from the break: a new stretch of the same sitting, same module and place. */
-async function resume() {
+/**
+ * Switch module without stopping. The time so far is saved under the module
+ * you were on, and a new stretch starts on the new one in the same sitting,
+ * so the clock and the XP carry on.
+ */
+async function switchModule(name) {
+  const live = state.live;
+  if (!live || name === live.subject) return;
+  const now = new Date();
+  const length = +now - +new Date(live.started_at);
+  if (length > MAX_SESSION_MS) return askWhenStopped();
+  const fresh = length < MIN_SESSION_MS;
+  // Under a minute in, it was the wrong button: relabel the stretch instead of saving a scrap.
+  const saved = fresh ? 0 : await saveStretch(live, now);
+  if (saved === null) return;
+  const row = fresh
+    ? { subject: name }
+    : { session_id: crypto.randomUUID(), subject: name, started_at: now.toISOString(), banked_seconds: (live.banked_seconds || 0) + Math.round(saved / 1000) };
+  // Only this timer: if it was stopped or replaced on another device, nothing changes.
+  const { data, error } = await db.from("live").update(row).eq("user_id", state.user.id).eq("session_id", live.session_id).select("session_id");
+  if (error) return oops(error);
+  if (!data?.length) { await refresh(); render(); return toast("That timer isn't running any more.", { bad: true }); }
+  state.live = { ...live, ...row };
+  state.subject = name;
+  render();
+  refreshSoon();
+  toast(fresh ? `Switched to ${name}` : `Switched to ${name} · ${hm(saved / 60000)} on ${live.subject} saved`);
+}
+
+/** Back from the break: a new stretch of the same sitting, in the same place, on whichever module you pick. */
+async function resume(subject = state.paused?.paused_subject) {
   const paused = state.paused;
   if (!paused) return;
-  const row = { session_id: crypto.randomUUID(), subject: paused.paused_subject, started_at: new Date().toISOString(), location: paused.location, paused_at: null, paused_subject: null, banked_seconds: paused.banked_seconds };
+  const row = { session_id: crypto.randomUUID(), subject, started_at: new Date().toISOString(), location: paused.location, paused_at: null, paused_subject: null, banked_seconds: paused.banked_seconds };
   const { error } = await db.from("live").update(row).eq("user_id", state.user.id);
   if (error) return oops(error);
   state.paused = null;
@@ -504,7 +534,7 @@ async function endBreak() {
   const { error } = await db.from("live").update({ location: null, paused_at: null, paused_subject: null, banked_seconds: 0 }).eq("user_id", state.user.id);
   if (error) return oops(error);
   state.paused = null;
-  await celebrate(paused.paused_subject, minutes, levelBefore);
+  await celebrate(null, minutes, levelBefore);
 }
 
 function askWhenStopped() {
@@ -601,6 +631,7 @@ function runningCard() {
     sittingClock(live, "big-clock"),
     h("div", { class: "xp-tick" }, "⭐️ +", h("span", { dataset: { xpSince: live.started_at, banked: live.banked_seconds || 0 } }, String(Math.floor(sittingMs(live) / 60000))), " XP"),
     live.location ? h("p", { class: "running-where" }, "📍 ", live.location) : null,
+    switchChips(live.subject),
     h("div", { class: "running-actions" },
       h("button", { class: "btn btn-big btn-soft", onclick: () => pause() }, "⏸ Pause"),
       h("button", { class: "btn btn-big", onclick: () => finish() }, "✓ Done")),
@@ -609,16 +640,35 @@ function runningCard() {
       h("button", { class: "link", onclick: () => finish({ discard: true }) }, live.banked_seconds ? "Cancel this stretch" : "Cancel without saving")));
 }
 
+/** The other modules, one tap each: the clock keeps going and the time so far stays with the module it was on. */
+function switchChips(current) {
+  const others = activeModules().filter((m) => m.name !== current);
+  if (!others.length) return null;
+  return h("div", { class: "switch-to" },
+    h("span", { class: "label" }, "Switch module · same session"),
+    h("div", { class: "chips module-chips" }, others.map((m) => h("button", { type: "button", class: "chip module-chip", onclick: () => switchModule(m.name) }, dot(m), m.name))));
+}
+
 function pausedCard() {
   const paused = state.paused;
+  let next = paused.paused_subject;
+  const go = h("button", { class: "btn btn-big btn-live", onclick: () => resume(next) });
+  const names = [...new Set([paused.paused_subject, ...activeModules().map((m) => m.name)])];
+  const chips = h("div", { class: "chips module-chips", role: "group", "aria-label": "Resume on" });
+  function paint() {
+    go.textContent = next === paused.paused_subject ? "▶ Resume" : `▶ Resume on ${next}`;
+    chips.replaceChildren(...names.map((name) => h("button", { type: "button", class: "chip module-chip", "aria-pressed": String(name === next), onclick: () => { next = name; paint(); } }, dot(moduleNamed(name)), name)));
+  }
+  paint();
   return h("section", { class: "card running is-paused" },
     h("span", { class: "running-tag" }, "ON A BREAK"),
     h("h2", null, paused.paused_subject),
     h("div", { class: "big-clock" }, clock(sittingMs(paused))),
     h("p", { class: "break-for" }, "☕ Break ", h("span", { dataset: { since: paused.paused_at } }, clock(Date.now() - +new Date(paused.paused_at)))),
     paused.location ? h("p", { class: "running-where" }, "📍 ", paused.location) : null,
+    names.length > 1 ? h("div", { class: "switch-to" }, h("span", { class: "label" }, "Resume on"), chips) : null,
     h("div", { class: "running-actions" },
-      h("button", { class: "btn btn-big btn-live", onclick: () => resume() }, "▶ Resume"),
+      go,
       h("button", { class: "btn btn-big btn-soft", onclick: () => endBreak() }, "✓ Done")),
     h("p", { class: "small muted running-foot" }, "Your crew sees you're on a break. The time so far is saved."));
 }

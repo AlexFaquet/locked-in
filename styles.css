@@ -143,6 +143,10 @@ p { margin: 0; }
 .running .btn { margin-top: 20px; }
 .running-foot { margin-top: 8px; }
 .running-actions { display: flex; gap: 10px; margin-top: 20px; }
+.switch-to { margin-top: 18px; }
+.switch-to .label { margin-bottom: 0; }
+.switch-to .module-chips { justify-content: center; margin-top: 8px; }
+.switch-to .chip { font-size: 14px; padding: 7px 12px; }
 .running-actions .btn { flex: 1; margin-top: 0; }
 /* On a break: gold instead of green, and the clock stands still. */
 .running.is-paused { border-color: var(--gold-press); box-shadow: 0 5px 0 var(--gold-press); background: radial-gradient(120% 90% at 50% 0%, color-mix(in srgb, var(--gold) 24%, var(--card)), var(--card) 70%); }
