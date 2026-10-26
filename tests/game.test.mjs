@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { levelFor, levelProgress, minutesForLevel, streakFrom, badgesFor, standings, chaseLine, hm, clock, untilReset, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours } from "../game.mjs";
+import { levelFor, levelProgress, minutesForLevel, streakFrom, badgesFor, standings, chaseLine, hm, clock, untilReset, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS } from "../game.mjs";
 
 test("levels get steeper and the bar measures progress inside one", () => {
   assert.deepEqual([0, 149, 150, 599, 600, 2400, 12150].map(levelFor), [1, 1, 2, 2, 3, 5, 10]);
@@ -65,4 +65,17 @@ test("chart gridlines land on whole hours", () => {
   assert.deepEqual(hourTicks(255), { top: 360, step: 120 });
   assert.deepEqual(hourTicks(750), { top: 900, step: 300 });
   assert.deepEqual([shortHours(255), shortHours(750)], ["4.3h", "13h"]);
+});
+
+test("a paused sitting keeps its time, and a break only lasts so long", () => {
+  const now = Date.parse("2026-10-26T15:00:00Z");
+  const running = { started_at: "2026-10-26T14:50:00Z", banked_seconds: 1800, paused_at: null };
+  assert.equal(sittingMs(running, now), 40 * 60000, "30 minutes before the break and 10 since");
+  const paused = { started_at: null, banked_seconds: 1800, paused_at: "2026-10-26T14:30:00Z" };
+  assert.equal(sittingMs(paused, now), 30 * 60000, "the clock stands still on a break");
+  assert.equal(sittingMs(null, now), 0);
+  assert.equal(onBreak(paused, BREAK_SHOWN_MS, now), true);
+  assert.equal(onBreak(paused, BREAK_SHOWN_MS, now + 3 * 3600000), false, "crewmates stop seeing an old break");
+  assert.equal(onBreak(paused, BREAK_KEPT_MS, now + 3 * 3600000), true, "but you can still resume it");
+  assert.equal(onBreak(running, BREAK_KEPT_MS, now), false, "studying isn't a break");
 });

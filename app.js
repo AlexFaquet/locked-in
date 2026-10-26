@@ -6,7 +6,7 @@
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/+esm";
 import { SUPABASE_URL, SUPABASE_KEY } from "./config.js";
-import { levelProgress, streakFrom, badgesFor, standings, chaseLine, hm, clock, untilReset, ago, localDay, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours } from "./game.mjs";
+import { levelProgress, streakFrom, badgesFor, standings, chaseLine, hm, clock, untilReset, ago, localDay, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS } from "./game.mjs";
 
 const db = createClient(SUPABASE_URL, SUPABASE_KEY);
 const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/London";
@@ -22,7 +22,7 @@ const SKIPPED_MODULES_KEY = "lockedin.skippedModules";
 const ACTIVITY_KEY = "lockedin.activityView";
 
 const state = {
-  user: null, me: null, crews: [], people: [], live: null, feed: [], mine: [], keys: [], modules: [],
+  user: null, me: null, crews: [], people: [], live: null, paused: null, breaks: [], liveRows: new Map(), feed: [], mine: [], keys: [], modules: [],
   tab: readStored(TAB_KEY) || "now", board: "week", subject: "", place: "",
 };
 let channel = null;
@@ -285,7 +285,8 @@ async function refresh() {
   const uid = state.user.id;
   const [stats, live, feed, mine, keys, modules] = await Promise.all([
     db.rpc("room_stats", { p_tz: TZ }),
-    db.from("live").select("session_id, subject, started_at, location").eq("user_id", uid).maybeSingle(),
+    // Yours and your crewmates', as the database allows: who's studying, who's on a break.
+    db.from("live").select("user_id, session_id, subject, started_at, location, paused_at, paused_subject, banked_seconds"),
     db.from("sessions").select("id, user_id, subject, started_at, ended_at, location").order("ended_at", { ascending: false }).limit(25),
     db.from("sessions").select("id, subject, started_at, ended_at, location").eq("user_id", uid).gte("started_at", new Date(Date.now() - 70 * 86400000).toISOString()).order("started_at", { ascending: false }).limit(400),
     db.from("link_keys").select("id, label, created_at, last_used_at").order("created_at"),
@@ -295,7 +296,11 @@ async function refresh() {
   const failed = [stats, live, feed, mine, keys, modules].find((r) => r.error);
   if (failed) return oops(failed.error, "Couldn't load your crew.");
   state.people = stats.data || [];
-  state.live = live.data?.started_at ? live.data : null;
+  state.liveRows = new Map((live.data || []).map((row) => [row.user_id, row]));
+  const own = state.liveRows.get(uid);
+  state.live = own?.started_at ? own : null;
+  state.paused = onBreak(own, BREAK_KEPT_MS) ? own : null;
+  state.breaks = (live.data || []).filter((row) => row.user_id !== uid && byId(row.user_id) && onBreak(row, BREAK_SHOWN_MS));
   state.feed = feed.data || [];
   state.mine = mine.data || [];
   state.keys = keys.data || [];
@@ -386,7 +391,8 @@ function subscribe() {
   channel = db.channel("crew")
     .on("postgres_changes", { event: "*", schema: "public", table: "live" }, ({ new: row }) => {
       const before = row?.user_id && byId(row.user_id);
-      if (row?.started_at && row.user_id !== state.user.id && before && !before.live_started_at) {
+      // Coming back from a break isn't news; locking in is.
+      if (row?.started_at && !row.banked_seconds && row.user_id !== state.user.id && before && !before.live_started_at) {
         notify(`${before.emoji} ${before.name} just locked in on ${row.subject}${row.location ? ` at ${row.location}` : ""}`);
       }
       refreshSoon();
@@ -409,7 +415,8 @@ function subscribe() {
 async function lockIn() {
   const subject = state.subject.trim();
   if (!subject) return toast("Pick a module first, or add one.", { bad: true });
-  const row = { user_id: state.user.id, session_id: crypto.randomUUID(), subject, started_at: new Date().toISOString(), location: state.place.trim() || null };
+  // A new sitting: whatever break was left over ends here.
+  const row = { user_id: state.user.id, session_id: crypto.randomUUID(), subject, started_at: new Date().toISOString(), location: state.place.trim() || null, paused_at: null, paused_subject: null, banked_seconds: 0 };
   const { error } = await db.from("live").upsert(row, { onConflict: "user_id" });
   if (error) return oops(error);
   state.live = row;
@@ -418,27 +425,86 @@ async function lockIn() {
   refreshSoon();
 }
 
+/** Saves the stretch running now, if it's long enough to count. Returns its length, or null if that failed. */
+async function saveStretch(live, end) {
+  const length = +end - +new Date(live.started_at);
+  if (length < MIN_SESSION_MS) return 0;
+  const { error } = await db.from("sessions").insert({ id: live.session_id, user_id: state.user.id, subject: live.subject, started_at: live.started_at, ended_at: end.toISOString(), location: live.location });
+  if (error) { oops(error); return null; }
+  return length;
+}
+
+/** The whole sitting is over: XP for all of it, and a level-up if it got you one. */
+async function celebrate(subject, minutes, levelBefore) {
+  await refresh();
+  render();
+  const after = levelProgress(byId(state.user.id)?.total_minutes || 0);
+  if (minutes < 1) toast("Under a minute — not counted.");
+  else if (after.level > levelBefore) { confetti(["⭐️", "🎉", "🏆", "✨"]); toast(`Level up! You're Level ${after.level} — ${after.title} 🏆`, { ms: 6000 }); }
+  else { if (minutes >= 25) confetti(); toast(`+${Math.round(minutes)} XP · ${hm(minutes)} on ${subject} 💪`); }
+}
+
 /** Stops the timer. Under a minute isn't kept; past 16 hours we ask when you really stopped. */
 async function finish({ discard = false, end = new Date() } = {}) {
   const live = state.live;
   if (!live) return;
-  const length = +end - +new Date(live.started_at);
-  if (!discard && length > MAX_SESSION_MS) return askWhenStopped();
-  const levelBefore = levelProgress(byId(state.user.id)?.total_minutes || 0).level;
-  if (!discard && length >= MIN_SESSION_MS) {
-    const { error } = await db.from("sessions").insert({ id: live.session_id, user_id: state.user.id, subject: live.subject, started_at: live.started_at, ended_at: end.toISOString(), location: live.location });
-    if (error) return oops(error);
-  }
-  const { error } = await db.from("live").update({ session_id: null, subject: null, started_at: null, location: null }).eq("user_id", state.user.id);
+  if (!discard && +end - +new Date(live.started_at) > MAX_SESSION_MS) return askWhenStopped();
+  // Stretches before a break are saved already, so XP counts from the sitting's start.
+  const banked = (live.banked_seconds || 0) / 60;
+  const levelBefore = levelProgress((byId(state.user.id)?.total_minutes || 0) - banked).level;
+  const saved = discard ? 0 : await saveStretch(live, end);
+  if (saved === null) return;
+  const { error } = await db.from("live").update({ session_id: null, subject: null, started_at: null, location: null, paused_at: null, paused_subject: null, banked_seconds: 0 }).eq("user_id", state.user.id);
   if (error) return oops(error);
   state.live = null;
-  await refresh();
+  if (discard) {
+    await refresh(); render();
+    return toast(banked >= 1 ? `This stretch is cancelled. The ${hm(banked)} before your break stays saved.` : "Timer cancelled.");
+  }
+  await celebrate(live.subject, banked + saved / 60000, levelBefore);
+}
+
+/** Takes a break: the stretch so far is saved, and the sitting waits for Resume. */
+async function pause() {
+  const live = state.live;
+  if (!live) return;
+  const end = new Date();
+  if (+end - +new Date(live.started_at) > MAX_SESSION_MS) return askWhenStopped();
+  const saved = await saveStretch(live, end);
+  if (saved === null) return;
+  const row = { session_id: null, subject: null, started_at: null, paused_at: end.toISOString(), paused_subject: live.subject, banked_seconds: (live.banked_seconds || 0) + Math.round(saved / 1000) };
+  const { error } = await db.from("live").update(row).eq("user_id", state.user.id);
+  if (error) return oops(error);
+  state.live = null;
+  state.paused = { ...live, ...row };
   render();
-  const minutes = length / 60000;
-  const after = levelProgress(byId(state.user.id)?.total_minutes || 0);
-  if (discard || length < MIN_SESSION_MS) toast(discard ? "Timer cancelled." : "Under a minute — not counted.");
-  else if (after.level > levelBefore) { confetti(["⭐️", "🎉", "🏆", "✨"]); toast(`Level up! You're Level ${after.level} — ${after.title} 🏆`, { ms: 6000 }); }
-  else { if (minutes >= 25) confetti(); toast(`+${Math.round(minutes)} XP · ${hm(minutes)} on ${live.subject} 💪`); }
+  refreshSoon();
+  toast(row.banked_seconds >= 60 ? `Paused · ${hm(row.banked_seconds / 60)} saved so far ☕` : "Paused ☕");
+}
+
+/** Back from the break: a new stretch of the same sitting, same module and place. */
+async function resume() {
+  const paused = state.paused;
+  if (!paused) return;
+  const row = { session_id: crypto.randomUUID(), subject: paused.paused_subject, started_at: new Date().toISOString(), location: paused.location, paused_at: null, paused_subject: null, banked_seconds: paused.banked_seconds };
+  const { error } = await db.from("live").update(row).eq("user_id", state.user.id);
+  if (error) return oops(error);
+  state.paused = null;
+  state.live = { ...paused, ...row };
+  render();
+  refreshSoon();
+}
+
+/** Done from a break: nothing left to save, so just close the sitting. */
+async function endBreak() {
+  const paused = state.paused;
+  if (!paused) return;
+  const minutes = (paused.banked_seconds || 0) / 60;
+  const levelBefore = levelProgress((byId(state.user.id)?.total_minutes || 0) - minutes).level;
+  const { error } = await db.from("live").update({ location: null, paused_at: null, paused_subject: null, banked_seconds: 0 }).eq("user_id", state.user.id);
+  if (error) return oops(error);
+  state.paused = null;
+  await celebrate(paused.paused_subject, minutes, levelBefore);
 }
 
 function askWhenStopped() {
@@ -483,10 +549,12 @@ function nowView() {
   const me = byId(state.user.id);
   const crewToday = state.people.reduce((sum, p) => sum + p.today_minutes, 0);
   return [
-    state.live ? runningCard() : startCard(),
+    state.live ? runningCard() : state.paused ? pausedCard() : startCard(),
     h("section", { class: "section" },
-      h("div", { class: "section-head" }, h("h2", null, "Locked in right now"), h("small", null, others.length ? `${others.length} studying` : "")),
-      others.length ? others.map(liveCard) : h("div", { class: "card empty" }, h("span", { class: "big" }, "🦗"), state.live ? "Just you. Lead by example." : "Nobody's locked in. Be the first.")),
+      h("div", { class: "section-head" }, h("h2", null, "Locked in right now"), h("small", null, [others.length ? `${others.length} studying` : "", state.breaks.length ? `${state.breaks.length} on a break` : ""].filter(Boolean).join(" · "))),
+      others.length || state.breaks.length
+        ? [...others.map(liveCard), ...state.breaks.map(breakCard)]
+        : h("div", { class: "card empty" }, h("span", { class: "big" }, "🦗"), state.live ? "Just you. Lead by example." : "Nobody's locked in. Be the first.")),
     h("section", { class: "section today" },
       h("div", { class: "stat" }, h("span", null, "You today"), h("strong", null, hm(me?.today_minutes || 0))),
       h("div", { class: "stat" }, h("span", null, "Crew today"), h("strong", null, hm(crewToday)))),
@@ -522,16 +590,35 @@ function startCard() {
     go);
 }
 
+/** The sitting's clock: what's banked from before any break, ticking on from the stretch's start. */
+const sittingClock = (row, className) => h("div", { class: className, dataset: { since: row.started_at, banked: row.banked_seconds || 0 } }, clock(sittingMs(row)));
+
 function runningCard() {
   const live = state.live;
   return h("section", { class: "card running" },
     h("span", { class: "running-tag" }, "LOCKED IN"),
     h("h2", null, live.subject),
-    h("div", { class: "big-clock", dataset: { since: live.started_at } }, clock(Date.now() - +new Date(live.started_at))),
-    h("div", { class: "xp-tick" }, "⭐️ +", h("span", { dataset: { xpSince: live.started_at } }, "0"), " XP"),
+    sittingClock(live, "big-clock"),
+    h("div", { class: "xp-tick" }, "⭐️ +", h("span", { dataset: { xpSince: live.started_at, banked: live.banked_seconds || 0 } }, String(Math.floor(sittingMs(live) / 60000))), " XP"),
     live.location ? h("p", { class: "running-where" }, "📍 ", live.location) : null,
-    h("button", { class: "btn btn-big btn-block", onclick: () => finish() }, "✓ Done"),
-    h("div", { class: "running-foot" }, h("button", { class: "link", onclick: () => finish({ discard: true }) }, "Cancel without saving")));
+    h("div", { class: "running-actions" },
+      h("button", { class: "btn btn-big btn-soft", onclick: () => pause() }, "⏸ Pause"),
+      h("button", { class: "btn btn-big", onclick: () => finish() }, "✓ Done")),
+    h("div", { class: "running-foot" }, h("button", { class: "link", onclick: () => finish({ discard: true }) }, live.banked_seconds ? "Cancel this stretch" : "Cancel without saving")));
+}
+
+function pausedCard() {
+  const paused = state.paused;
+  return h("section", { class: "card running is-paused" },
+    h("span", { class: "running-tag" }, "ON A BREAK"),
+    h("h2", null, paused.paused_subject),
+    h("div", { class: "big-clock" }, clock(sittingMs(paused))),
+    h("p", { class: "break-for" }, "☕ Break ", h("span", { dataset: { since: paused.paused_at } }, clock(Date.now() - +new Date(paused.paused_at)))),
+    paused.location ? h("p", { class: "running-where" }, "📍 ", paused.location) : null,
+    h("div", { class: "running-actions" },
+      h("button", { class: "btn btn-big btn-live", onclick: () => resume() }, "▶ Resume"),
+      h("button", { class: "btn btn-big btn-soft", onclick: () => endBreak() }, "✓ Done")),
+    h("p", { class: "small muted running-foot" }, "Your crew sees you're on a break. The time so far is saved."));
 }
 
 function liveCard(p) {
@@ -544,11 +631,21 @@ function liveCard(p) {
     personButton(p, "live-person",
       h("span", { class: "avatar is-live", "aria-hidden": "true" }, p.emoji),
       h("div", { class: "live-who" },
-        h("strong", null, p.name), " ", h("span", { class: "live-clock", dataset: { since: p.live_started_at } }, clock(Date.now() - +new Date(p.live_started_at))),
+        h("strong", null, p.name), " ", sittingClock({ started_at: p.live_started_at, banked_seconds: state.liveRows.get(p.user_id)?.banked_seconds }, "live-clock"),
         h("p", null, p.live_subject, p.live_location ? ` · 📍 ${p.live_location}` : ""))),
     h("div", { class: "live-actions" },
       p.live_location ? h("button", { class: "btn btn-small btn-live", onclick: () => ping("joining") }, "🏃 I'm coming") : null,
       h("button", { class: "btn btn-small btn-soft", onclick: () => ping("cheer") }, "🔥 Hype")));
+}
+
+function breakCard(row) {
+  const p = byId(row.user_id);
+  return h("article", { class: "card live-card break-card" },
+    personButton(p, "live-person",
+      h("span", { class: "avatar", "aria-hidden": "true" }, p.emoji),
+      h("div", { class: "live-who" },
+        h("strong", null, p.name), " ", h("span", { class: "break-clock" }, "☕ ", h("span", { dataset: { since: row.paused_at } }, clock(Date.now() - +new Date(row.paused_at)))),
+        h("p", null, `On a break from ${row.paused_subject} · ${hm(row.banked_seconds / 60)} so far`))));
 }
 
 function boardView() {
@@ -973,8 +1070,9 @@ async function deleteEverything() {
 
 function tick() {
   const now = Date.now();
-  for (const node of document.querySelectorAll("[data-since]")) node.textContent = clock(now - +new Date(node.dataset.since));
-  for (const node of document.querySelectorAll("[data-xp-since]")) node.textContent = String(Math.floor((now - +new Date(node.dataset.xpSince)) / 60000));
+  // data-banked is a sitting's time from before its breaks, in seconds.
+  for (const node of document.querySelectorAll("[data-since]")) node.textContent = clock(now - +new Date(node.dataset.since) + (Number(node.dataset.banked) || 0) * 1000);
+  for (const node of document.querySelectorAll("[data-xp-since]")) node.textContent = String(Math.floor((now - +new Date(node.dataset.xpSince) + (Number(node.dataset.banked) || 0) * 1000) / 60000));
 }
 setInterval(() => { if (!document.hidden) tick(); }, 1000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden && state.me && state.crews.length) refreshSoon(); });

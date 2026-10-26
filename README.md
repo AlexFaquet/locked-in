@@ -25,6 +25,10 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
 - **Lock in** on one of your modules, optionally saying where. Your crew sees you live,
   with a ticking clock, and can tap *I'm coming* or *Hype*. You get a toast,
   and a notification if you've turned them on while the app is open.
+- **Pause** for a break. What you've done so far is saved straight away, and
+  *Resume* carries on the same clock with the same module and place. Your crew
+  sees you're on a break (for up to three hours), and a pause shows on every
+  device you use. *Done* from a break ends the sitting with its XP.
 - **Earn XP** — a point a minute. Levels get steeper (Level 2 at 2.5 hours,
   Level 5 at 40, Level 10 at 202.5). Streaks count days with 30+ minutes;
   badges are for early starts, late nights, long sessions and milestones.
@@ -67,7 +71,9 @@ ever sent to it.
 all-time minutes, streak days, and the counts the badges use. Realtime
 publishes `live`, `sessions` and `pings`; stopping a timer clears your `live`
 row rather than deleting it, because Realtime can't apply row-level security
-to deletes.
+to deletes. A pause saves the stretch as a session and keeps `paused_at`,
+`paused_subject` and `banked_seconds` on that row; the `live_pause` trigger
+makes sure a running timer and a break never coexist.
 
 The Supabase advisor flags `create_crew` and `join_crew` as security-definer
 functions that signed-in users can call. That's deliberate: joining by code

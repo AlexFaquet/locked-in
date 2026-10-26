@@ -65,14 +65,21 @@ create index sessions_user_started_idx on public.sessions (user_id, started_at d
 
 -- One row per person: who is studying right now. Stopping clears the row
 -- rather than deleting it, because Realtime can't apply RLS to deletes.
+-- A pause saves the stretch so far as a session, then keeps the module, the
+-- place and the time already saved (banked_seconds) so Resume carries on the
+-- same sitting. Studying and being on a break never overlap.
 create table public.live (
   user_id uuid primary key default auth.uid() references public.profiles (id) on delete cascade,
   session_id uuid,
   subject text check (char_length(btrim(subject)) between 1 and 40),
   started_at timestamptz,
   location text check (char_length(location) <= 80),
+  paused_at timestamptz,
+  paused_subject text check (char_length(btrim(paused_subject)) between 1 and 40),
+  banked_seconds integer not null default 0 check (banked_seconds >= 0),
   updated_at timestamptz not null default now(),
-  constraint live_shape check ((started_at is null) = (subject is null) and (started_at is null) = (session_id is null))
+  constraint live_shape check ((started_at is null) = (subject is null) and (started_at is null) = (session_id is null)),
+  constraint live_pause_shape check ((paused_at is null) = (paused_subject is null) and (paused_at is null or started_at is null))
 );
 
 -- "I'm coming" and cheers between crewmates.
@@ -220,6 +227,28 @@ create trigger sessions_location before insert or update on public.sessions
   for each row execute function private.respect_location_sharing();
 create trigger live_location before insert or update on public.live
   for each row execute function private.respect_location_sharing();
+
+-- Keeps a break and a running timer apart, whoever writes the row.
+create function private.live_pause_rules()
+returns trigger
+language plpgsql set search_path = ''
+as $$
+begin
+  -- A timer that starts without resuming the break (from a linked app, say) begins a new sitting.
+  if new.started_at is not null and new.paused_at is not null then
+    new.paused_at := null;
+    new.paused_subject := null;
+    new.banked_seconds := 0;
+  end if;
+  -- Nothing running and no break: there's no sitting to carry on.
+  if new.started_at is null and new.paused_at is null then
+    new.banked_seconds := 0;
+  end if;
+  return new;
+end $$;
+revoke execute on function private.live_pause_rules() from public, anon, authenticated;
+create trigger live_pause before insert or update on public.live
+  for each row execute function private.live_pause_rules();
 
 -- Turning sharing off also takes back the places already shared.
 create function private.forget_locations()

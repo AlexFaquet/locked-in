@@ -115,6 +115,23 @@ export function hm(minutes) {
   return m >= 60 ? `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m` : `${m}m`;
 }
 
+/* A sitting is one go at studying, broken up by pauses. Each stretch is saved
+   as its own session when you pause; `banked_seconds` on the live row is what
+   those stretches add up to, so the clock carries on after a break. */
+
+/** How long your own break stays resumable; after that it's over. */
+export const BREAK_KEPT_MS = 12 * 3600000;
+/** How long crewmates see you "on a break"; after that you're just not studying. */
+export const BREAK_SHOWN_MS = 3 * 3600000;
+
+/** Time in this sitting: what's banked from before any breaks, plus the stretch running now. */
+export const sittingMs = (row, now = Date.now()) =>
+  (row?.banked_seconds || 0) * 1000 + (row?.started_at ? Math.max(0, now - +new Date(row.started_at)) : 0);
+
+/** A live row that's on a break, and not one older than `limit`. */
+export const onBreak = (row, limit, now = Date.now()) =>
+  Boolean(row?.paused_at && !row.started_at && now - +new Date(row.paused_at) < limit);
+
 /** "1:02:09" for a running timer. */
 export function clock(ms) {
   const s = Math.max(0, Math.floor(ms / 1000));

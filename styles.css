@@ -142,6 +142,14 @@ p { margin: 0; }
 .running-where { color: var(--ink-2); font-weight: 700; margin-top: 6px; overflow-wrap: anywhere; }
 .running .btn { margin-top: 20px; }
 .running-foot { margin-top: 8px; }
+.running-actions { display: flex; gap: 10px; margin-top: 20px; }
+.running-actions .btn { flex: 1; margin-top: 0; }
+/* On a break: gold instead of green, and the clock stands still. */
+.running.is-paused { border-color: var(--gold-press); box-shadow: 0 5px 0 var(--gold-press); background: radial-gradient(120% 90% at 50% 0%, color-mix(in srgb, var(--gold) 24%, var(--card)), var(--card) 70%); }
+.is-paused .running-tag { background: var(--gold); color: #1e1b2e; }
+.is-paused .running-tag::before { background: #1e1b2e; animation: none; }
+.is-paused .big-clock { color: var(--ink-2); }
+.break-for { color: var(--ink-2); font: 600 16px var(--display); font-variant-numeric: tabular-nums; }
 
 /* ---------- live friends ---------- */
 .live-card { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 14px; align-items: center; }
@@ -149,6 +157,8 @@ p { margin: 0; }
 .live-who strong { font: 600 18px var(--display); }
 .live-who p { color: var(--ink-2); font-weight: 700; overflow-wrap: anywhere; }
 .live-clock { color: var(--live-press); font: 600 15px var(--display); font-variant-numeric: tabular-nums; }
+.break-card { border-style: dashed; }
+.break-clock { color: var(--gold-press); font: 600 15px var(--display); font-variant-numeric: tabular-nums; }
 .live-actions { grid-column: 1 / -1; display: flex; gap: 10px; }
 .live-actions .btn { flex: 1; }
 .empty { text-align: center; padding: 26px 18px; color: var(--muted); font-weight: 700; }
