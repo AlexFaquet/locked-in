@@ -29,6 +29,11 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
   *Resume* carries on the same clock with the same module and place. Your crew
   sees you're on a break (for up to three hours), and a pause shows on every
   device you use. *Done* from a break ends the sitting with its XP.
+- **Fix the times.** *Edit* under the running clock changes its module, when
+  you really started, or where you are. In Me → *Your sessions*, ✎ changes a
+  saved session's module, day and times, and *+ Log one* adds one you forgot
+  to time. Nothing can overlap another session, end in the future or run
+  past 16 hours, and the board updates to match.
 - **Earn XP** — a point a minute. Levels get steeper (Level 2 at 2.5 hours,
   Level 5 at 40, Level 10 at 202.5). Streaks count days with 30+ minutes;
   badges are for early starts, late nights, long sessions and milestones.

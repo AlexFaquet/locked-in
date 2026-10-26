@@ -249,7 +249,7 @@ p { margin: 0; }
 .badge.locked b { filter: grayscale(1); opacity: .35; }
 .badge.got { background: color-mix(in srgb, var(--gold) 16%, var(--card)); border-color: var(--gold); }
 
-.session-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: center; padding: 11px 0; border-top: 2px solid var(--line); }
+.session-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; padding: 11px 0; border-top: 2px solid var(--line); }
 .session-row:first-child { border-top: 0; }
 .session-row p { font-weight: 800; overflow-wrap: anywhere; }
 .session-row small { color: var(--muted); font-weight: 700; }
