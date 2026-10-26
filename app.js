@@ -90,17 +90,65 @@ function confetti(symbols = ["🎉", "⭐️", "🔥", "📚", "✨"]) {
   setTimeout(() => layer.remove(), 2600);
 }
 
-/** A bottom sheet. `build(box, close)` fills it. */
-function sheet(build) {
-  const box = h("div", { class: "sheet", role: "dialog", "aria-modal": "true" });
+/* Bottom sheets that behave like a phone's: while one is open the page behind
+   stays put, and each has a history entry, so Back (or Safari's edge swipe)
+   closes it instead of leaving the app. Open sheets, newest last. */
+const sheets = [];
+// Sheets use history entries, so stop the browser restoring a scroll position when one closes.
+if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+// history.back() calls of our own still to arrive as popstate, so they don't close another sheet.
+let ownBacks = 0;
+
+addEventListener("popstate", () => {
+  if (ownBacks) {
+    ownBacks--;
+    // A sheet opened while our own Back was in flight gets its entry now.
+    if (!ownBacks) for (const s of sheets) if (!s.pushed) { history.pushState({ sheet: true }, ""); s.pushed = true; }
+    return;
+  }
+  sheets.at(-1)?.close({ fromHistory: true });
+});
+
+const onSheetKey = (ev) => { if (ev.key === "Escape") sheets.at(-1)?.close(); };
+
+/**
+ * A bottom sheet. `build(box, close)` fills it. `key` makes a second tap on the
+ * same thing a no-op instead of a second sheet. `focus` is the field that should
+ * take the keyboard, if any; otherwise the sheet itself takes focus, so no
+ * keyboard or date picker pops up uninvited.
+ */
+function sheet(build, { key = null, focus = null } = {}) {
+  const already = key && sheets.find((s) => s.key === key);
+  if (already) return already.close;
+  const box = h("div", { class: "sheet", role: "dialog", "aria-modal": "true", tabindex: "-1" });
   const back = h("div", { class: "sheet-back", onclick: (ev) => { if (ev.target === back) close(); } }, box);
-  const onKey = (ev) => { if (ev.key === "Escape") close(); };
-  function close() { back.remove(); document.removeEventListener("keydown", onKey); }
-  document.addEventListener("keydown", onKey);
+  const entry = { key, close, pushed: false };
+  function close({ fromHistory = false } = {}) {
+    const i = sheets.indexOf(entry);
+    if (i < 0) return;
+    sheets.splice(i, 1);
+    back.remove();
+    if (!sheets.length) { document.documentElement.classList.remove("sheet-open"); document.removeEventListener("keydown", onSheetKey); }
+    if (!fromHistory && entry.pushed) { ownBacks++; history.back(); }
+  }
+  if (!sheets.length) { document.documentElement.classList.add("sheet-open"); document.addEventListener("keydown", onSheetKey); }
+  sheets.push(entry);
+  if (!ownBacks) { history.pushState({ sheet: true }, ""); entry.pushed = true; }
   build(box, close);
   document.body.append(back);
-  box.querySelector("input, button")?.focus();
+  (focus || box).focus({ preventScroll: true });
   return close;
+}
+
+// iOS leaves fixed elements under the on-screen keyboard; lift sheets above it.
+if (window.visualViewport) {
+  const lift = () => {
+    const zoomed = Math.abs(visualViewport.scale - 1) > 0.01;
+    const hidden = zoomed ? 0 : Math.max(0, Math.round(innerHeight - visualViewport.height - visualViewport.offsetTop));
+    document.documentElement.style.setProperty("--keyboard", `${hidden}px`);
+  };
+  visualViewport.addEventListener("resize", lift);
+  visualViewport.addEventListener("scroll", lift);
 }
 
 function emojiPicker(current, onPick) {
@@ -346,7 +394,7 @@ function addModuleSheet(onAdded) {
       close();
       onAdded?.(added);
       render();
-    } }, input, h("div", { class: "btn-row" }, h("button", { class: "btn btn-soft", type: "button", onclick: close }, "Cancel"), h("button", { class: "btn", type: "submit" }, "Add")))));
+    } }, input, h("div", { class: "btn-row" }, h("button", { class: "btn btn-soft", type: "button", onclick: close }, "Cancel"), h("button", { class: "btn", type: "submit" }, "Add")))), { focus: input });
 }
 
 function renameModule(m) {
@@ -360,7 +408,7 @@ function renameModule(m) {
       if (error) return oops(error);
       if (state.subject.trim().toLowerCase() === m.name.toLowerCase()) state.subject = input.value.trim();
       close(); await refresh(); render(); toast("Renamed.");
-    } }, input, h("div", { class: "btn-row" }, h("button", { class: "btn btn-soft", type: "button", onclick: close }, "Cancel"), h("button", { class: "btn", type: "submit" }, "Save")))));
+    } }, input, h("div", { class: "btn-row" }, h("button", { class: "btn btn-soft", type: "button", onclick: close }, "Cancel"), h("button", { class: "btn", type: "submit" }, "Save")))), { focus: input });
 }
 
 async function archiveModule(m, archived) {
@@ -884,8 +932,10 @@ function heatmap(days = {}, sessions = []) {
 const tip = h("div", { class: "tip", role: "tooltip", hidden: true });
 document.body.append(tip);
 let tipFor = null;
+let tipShownAt = 0;
 function showTip(target, lines) {
   tipFor = target;
+  tipShownAt = Date.now();
   tip.replaceChildren(...lines.map((line, i) => h(i ? "span" : "strong", null, line)));
   tip.hidden = false;
   const r = target.getBoundingClientRect();
@@ -900,32 +950,38 @@ function explain(node, lines) {
   node.addEventListener("pointerleave", (ev) => { if (ev.pointerType === "mouse") hideTip(); });
   node.addEventListener("focus", () => showTip(node, lines()));
   node.addEventListener("blur", hideTip);
-  node.addEventListener("click", (ev) => { ev.stopPropagation(); if (tipFor === node && ev.pointerType !== "mouse") hideTip(); else showTip(node, lines()); });
+  // A second tap closes it. On Android the tap's own focus opens it just before the click, which isn't a second tap.
+  node.addEventListener("click", (ev) => { ev.stopPropagation(); if (tipFor === node && ev.pointerType !== "mouse" && Date.now() - tipShownAt > 400) hideTip(); else showTip(node, lines()); });
 }
 document.addEventListener("click", hideTip);
 document.addEventListener("scroll", hideTip, { capture: true, passive: true });
 addEventListener("resize", hideTip);
 
 /** A crewmate's profile. Yours lives in Me. */
-async function openProfile(userId) {
+function openProfile(userId) {
   hideTip();
   if (userId === state.user.id) { state.tab = "me"; store(TAB_KEY, "me"); render(); scrollTo({ top: 0 }); return; }
   const stats = byId(userId);
   if (!stats) return;
-  const { data: sessions, error } = await db.from("sessions").select("subject, started_at, ended_at, location")
-    .eq("user_id", userId).gte("started_at", new Date(Date.now() - 70 * 86400000).toISOString()).order("started_at", { ascending: false }).limit(400);
-  if (error) return oops(error);
   const person = { ...EMPTY_STATS, ...stats };
-  sheet((box, close) => box.append(
-    h("div", { class: "sheet-top" }, h("button", { class: "link", onclick: close }, "Close")),
-    heroCard(person),
-    activityCard(person, sessions || [], "Activity"),
-    badgesSection(person),
-    h("section", { class: "section" },
-      h("div", { class: "section-head" }, h("h2", null, "Recent sessions")),
-      h("div", { class: "card" }, (sessions || []).length ? sessions.slice(0, 6).map((s) => h("div", { class: "session-row" },
-        h("div", null, h("p", null, s.subject), h("small", null, [`${new Date(s.started_at).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })} ${timeOf(s.started_at)}–${timeOf(s.ended_at)}`, s.location].filter(Boolean).join(" · "))),
-        h("strong", { class: "feed-time" }, hm(minutesBetween(s.started_at, s.ended_at))))) : h("p", { class: "empty" }, `${person.name} hasn't logged anything recently.`)))));
+  // Open at once with what the board already knows; the sessions fill in when they arrive.
+  sheet((box, close) => {
+    const pending = h("div", { class: "card empty profile-pending" }, h("span", { class: "big" }, "⏳"), "Loading activity…");
+    const badges = badgesSection(person);
+    box.append(h("div", { class: "sheet-top" }, h("button", { class: "link", onclick: close }, "Close")), heroCard(person), pending, badges);
+    db.from("sessions").select("subject, started_at, ended_at, location")
+      .eq("user_id", userId).gte("started_at", new Date(Date.now() - 70 * 86400000).toISOString()).order("started_at", { ascending: false }).limit(400)
+      .then(({ data: sessions, error }) => {
+        if (!box.isConnected) return;
+        if (error) return pending.replaceChildren("Couldn't load their activity. Close and try again.");
+        pending.replaceWith(activityCard(person, sessions || [], "Activity"));
+        badges.after(h("section", { class: "section" },
+          h("div", { class: "section-head" }, h("h2", null, "Recent sessions")),
+          h("div", { class: "card" }, (sessions || []).length ? sessions.slice(0, 6).map((s) => h("div", { class: "session-row" },
+            h("div", null, h("p", null, s.subject), h("small", null, [`${new Date(s.started_at).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })} ${timeOf(s.started_at)}–${timeOf(s.ended_at)}`, s.location].filter(Boolean).join(" · "))),
+            h("strong", { class: "feed-time" }, hm(minutesBetween(s.started_at, s.ended_at))))) : h("p", { class: "empty" }, `${person.name} hasn't logged anything recently.`))));
+      });
+  }, { key: `profile:${userId}` });
 }
 
 /** Anywhere a person appears, tapping them opens their profile. */
@@ -944,7 +1000,7 @@ function settingsCard() {
     h("div", { class: "section-head" }, h("h2", null, "Settings")),
     h("div", { class: "card" },
       h("div", { class: "setting" }, h("div", null, h("strong", null, `${state.me.emoji} ${state.me.name}`), h("small", null, "Your name and emoji")), h("button", { class: "btn btn-small btn-soft", onclick: editProfile }, "Edit")),
-      h("div", { class: "setting" }, h("div", null, h("strong", null, "Share where I study"), h("small", null, "So friends can come and join you")), share),
+      h("label", { class: "setting" }, h("div", null, h("strong", null, "Share where I study"), h("small", null, "So friends can come and join you")), share),
       canNotify ? h("div", { class: "setting" }, h("div", null, h("strong", null, "Notifications"), h("small", null, Notification.permission === "granted" ? "On while Locked In is open" : "When a friend locks in or pings you")),
         Notification.permission === "granted" ? h("span", { class: "pill" }, "✓ On") : h("button", { class: "btn btn-small btn-soft", onclick: async () => { await Notification.requestPermission(); render(); } }, "Turn on")) : null,
       h("div", { class: "setting" }, h("div", null, h("strong", null, "Your other devices"), h("small", null, "Use this account on your laptop or another phone")), h("button", { class: "btn btn-small btn-soft", onclick: showPairingCode }, "Add a device"))),
@@ -998,7 +1054,7 @@ function enterCode({ switching = false } = {}) {
       catch (error) { oops(error); go.disabled = false; }
     } },
       input,
-      h("div", { class: "btn-row" }, h("button", { class: "btn btn-soft", type: "button", onclick: close }, "Cancel"), h("button", { class: "btn", type: "submit" }, "Sign in")))));
+      h("div", { class: "btn-row" }, h("button", { class: "btn btn-soft", type: "button", onclick: close }, "Cancel"), h("button", { class: "btn", type: "submit" }, "Sign in")))), { focus: input });
 }
 
 async function pairWith(code) {

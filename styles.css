@@ -53,6 +53,8 @@ html { -webkit-text-size-adjust: 100%; }
 body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--ink); font: 500 16px/1.45 var(--body); -webkit-font-smoothing: antialiased; }
 button, input, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
+/* Taps: no grey flash, no double-tap zoom; every control gives its own feedback. */
+button, a, label, input, select { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
 h1, h2, h3 { font-family: var(--display); font-weight: 600; margin: 0; letter-spacing: -.01em; }
 p { margin: 0; }
 [hidden] { display: none !important; }
@@ -89,7 +91,6 @@ p { margin: 0; }
 .small { font-size: 14px; }
 
 .btn { --face: var(--primary); --edge: var(--primary-press); display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 50px; padding: 12px 20px; border: 0; border-radius: 16px; background: var(--face); color: #fff; font: 600 18px var(--display); letter-spacing: .01em; box-shadow: 0 5px 0 var(--edge); transform: translateY(0); transition: transform .08s, box-shadow .08s, filter .15s; touch-action: manipulation; user-select: none; }
-.btn:hover { filter: brightness(1.05); }
 .btn:active { transform: translateY(4px); box-shadow: 0 1px 0 var(--edge); }
 .btn:disabled { opacity: .5; cursor: not-allowed; transform: none; }
 .btn-block { width: 100%; }
@@ -97,12 +98,12 @@ p { margin: 0; }
 .btn-live { --face: var(--live); --edge: var(--live-press); }
 .btn-gold { --face: var(--gold); --edge: var(--gold-press); color: #2b2100; }
 .btn-soft { --face: var(--card); --edge: var(--line); color: var(--ink); border: 2px solid var(--line); box-shadow: 0 4px 0 var(--line); }
-.btn-small { min-height: 40px; padding: 8px 14px; font-size: 15px; border-radius: 13px; box-shadow: 0 4px 0 var(--edge); white-space: nowrap; }
+.btn-small { min-height: 44px; padding: 8px 14px; font-size: 15px; border-radius: 13px; box-shadow: 0 4px 0 var(--edge); white-space: nowrap; }
 .btn-danger { --face: var(--danger); --edge: #a91e2e; }
-.link { border: 0; background: none; padding: 6px; color: var(--muted); font-weight: 800; text-decoration: underline; text-underline-offset: 3px; }
+.link { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; border: 0; background: none; padding: 6px; color: var(--muted); font-weight: 800; text-decoration: underline; text-underline-offset: 3px; }
 
 .chips { display: flex; flex-wrap: wrap; gap: 8px; }
-.chip { padding: 9px 14px; border-radius: 999px; border: 2px solid var(--line); background: var(--card); font-weight: 800; font-size: 15px; box-shadow: 0 3px 0 var(--line); }
+.chip { min-height: 44px; padding: 9px 14px; border-radius: 999px; border: 2px solid var(--line); background: var(--card); font-weight: 800; font-size: 15px; box-shadow: 0 3px 0 var(--line); }
 .chip[aria-pressed="true"] { background: var(--primary-soft); border-color: var(--primary); color: var(--primary); box-shadow: 0 3px 0 var(--primary); }
 
 .emoji-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(52px, 1fr)); gap: 8px; }
@@ -175,7 +176,7 @@ p { margin: 0; }
 
 /* ---------- the board ---------- */
 .toggle { display: inline-flex; padding: 4px; border-radius: 16px; background: var(--sunk); border: 2px solid var(--line); }
-.toggle button { border: 0; background: none; padding: 8px 14px; border-radius: 12px; font-weight: 800; color: var(--muted); }
+.toggle button { min-height: 44px; border: 0; background: none; padding: 8px 14px; border-radius: 12px; font-weight: 800; color: var(--muted); }
 .toggle button[aria-pressed="true"] { background: var(--card); color: var(--ink); box-shadow: 0 2px 0 var(--line); }
 .board-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 18px; }
 .reset { font-weight: 800; font-size: 13px; color: var(--muted); }
@@ -234,7 +235,6 @@ p { margin: 0; }
 .heat { display: grid; grid-template-columns: repeat(10, 1fr); grid-auto-flow: column; grid-template-rows: repeat(7, auto); gap: 5px; }
 .heat > * { aspect-ratio: 1; border-radius: 5px; background: var(--sunk); border: 0; padding: 0; min-width: 0; }
 .heat button { cursor: pointer; }
-.heat button:hover { outline: 2px solid var(--ink-2); outline-offset: 1px; }
 .heat-future { visibility: hidden; }
 :is(.heat, .heat-key) [data-level="1"] { background: color-mix(in srgb, var(--primary) 28%, var(--sunk)); }
 :is(.heat, .heat-key) [data-level="2"] { background: color-mix(in srgb, var(--primary) 55%, var(--sunk)); }
@@ -257,7 +257,7 @@ p { margin: 0; }
 .session-row:first-child { border-top: 0; }
 .session-row p { font-weight: 800; overflow-wrap: anywhere; }
 .session-row small { color: var(--muted); font-weight: 700; }
-.x { width: 36px; height: 36px; border-radius: 12px; border: 2px solid var(--line); background: var(--sunk); color: var(--muted); font-weight: 800; }
+.x { width: 44px; height: 44px; border-radius: 12px; border: 2px solid var(--line); background: var(--sunk); color: var(--muted); font-weight: 800; }
 
 .setting { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 14px 0; border-top: 2px solid var(--line); }
 .setting:first-of-type { border-top: 0; }
@@ -288,11 +288,16 @@ p { margin: 0; }
 .toast.bad { background: var(--danger); color: #fff; }
 @keyframes pop { from { transform: translateY(14px) scale(.96); opacity: 0; } }
 
-.sheet-back { position: fixed; inset: 0; background: rgba(21, 19, 31, .45); z-index: 40; display: grid; align-items: end; justify-items: center; animation: fade .2s; }
+/* While a sheet is open the page behind can't scroll, and a swipe on the dimmed area does nothing. */
+html.sheet-open, html.sheet-open body { overflow: hidden; }
+.sheet-back { position: fixed; inset: 0; background: rgba(21, 19, 31, .45); z-index: 40; display: grid; align-items: end; justify-items: center; padding-bottom: var(--keyboard, 0px); overscroll-behavior: contain; touch-action: none; animation: fade .2s; }
 @keyframes fade { from { opacity: 0; } }
-.sheet { width: min(560px, 100%); max-height: 92vh; overflow-y: auto; background: var(--card); border-radius: 28px 28px 0 0; padding: 24px 20px calc(24px + env(safe-area-inset-bottom)); animation: rise .28s cubic-bezier(.2, .9, .3, 1); }
+/* dvh is the height Safari actually shows (vh counts the space under its toolbars); --keyboard keeps fields above the iOS keyboard. */
+.sheet { width: min(560px, 100%); max-height: 92vh; max-height: calc(92dvh - var(--keyboard, 0px)); overflow-y: auto; overscroll-behavior: contain; touch-action: pan-y pinch-zoom; background: var(--card); border-radius: 28px 28px 0 0; padding: 24px 20px calc(24px + env(safe-area-inset-bottom)); animation: rise .28s cubic-bezier(.2, .9, .3, 1); }
 @keyframes rise { from { transform: translateY(40px); opacity: 0; } }
 .sheet h2 { font-size: 24px; }
+.sheet:focus { outline: none; }
+.profile-pending { min-height: 280px; display: grid; place-content: center; margin-top: 18px; }
 .sheet .btn-row { display: flex; gap: 10px; margin-top: 22px; }
 .sheet .btn-row .btn { flex: 1; }
 .form-grid { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 10px; }
@@ -340,12 +345,13 @@ p { margin: 0; }
 
 /* ---------- people you can tap ---------- */
 :where(.person-btn) { appearance: none; display: block; width: 100%; margin: 0; padding: 0; border: 0; border-radius: 16px; background: none; color: inherit; font: inherit; text-align: inherit; cursor: pointer; }
-.person-btn:hover .avatar { transform: scale(1.05); }
+.person-btn:active { background: var(--sunk); }
 .person-btn .avatar { transition: transform .15s; }
 .podium-spot.person-btn { text-align: center; }
 .live-person { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 14px; align-items: center; grid-column: 1 / -1; }
 .hero-live { margin-top: 8px; color: var(--live-press); font-weight: 800; overflow-wrap: anywhere; }
-.sheet-top { display: flex; justify-content: flex-end; margin: -10px -6px 6px; }
+/* A long profile keeps its Close button in reach. */
+.sheet-top { position: sticky; top: -24px; z-index: 3; display: flex; justify-content: flex-end; margin: -24px -20px 6px; padding: 8px 14px 0; background: var(--card); border-radius: 28px 28px 0 0; }
 .sheet .hero { margin-top: 0; }
 
 /* ---------- activity: weekly bars ---------- */
@@ -358,7 +364,7 @@ p { margin: 0; }
 .wk-col { position: relative; z-index: 1; height: 100%; display: flex; align-items: flex-end; justify-content: center; padding: 0; border: 0; background: none; cursor: pointer; }
 .wk-bar { width: min(24px, 80%); border-radius: 6px 6px 0 0; background: color-mix(in srgb, var(--primary) 42%, var(--card)); transition: filter .15s; }
 .wk-col.is-current .wk-bar { background: var(--primary); }
-.wk-col:hover .wk-bar, .wk-col:focus-visible .wk-bar { filter: brightness(1.12) saturate(1.1); }
+.wk-col:focus-visible .wk-bar { filter: brightness(1.12) saturate(1.1); }
 .wk-value { position: absolute; left: 50%; transform: translateX(-50%); font: 600 12px var(--display); color: var(--ink-2); white-space: nowrap; pointer-events: none; }
 .wk-labels { display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 6px; margin: 6px 0 0 30px; font: 700 11px var(--body); color: var(--muted); text-align: center; white-space: nowrap; }
 .chart-note { margin-top: 12px; font-size: 13px; font-weight: 700; color: var(--muted); }
@@ -366,3 +372,11 @@ p { margin: 0; }
 /* ---------- the details tooltip ---------- */
 .tip { position: fixed; z-index: 60; display: grid; gap: 2px; max-width: 240px; padding: 10px 12px; border-radius: 14px; background: var(--ink); color: var(--bg); font-size: 13px; font-weight: 700; box-shadow: 0 10px 30px rgba(0, 0, 0, .25); pointer-events: none; }
 .tip strong { font: 600 14px var(--display); }
+
+/* Hover effects only where there's a mouse, so a tap never leaves one stuck on. */
+@media (hover: hover) {
+  .btn:hover { filter: brightness(1.05); }
+  .heat button:hover { outline: 2px solid var(--ink-2); outline-offset: 1px; }
+  .person-btn:hover .avatar { transform: scale(1.05); }
+  .wk-col:hover .wk-bar { filter: brightness(1.12) saturate(1.1); }
+}
