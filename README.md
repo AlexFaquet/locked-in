@@ -48,8 +48,10 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
   ten weeks, this week bright) and **Daily** (every day as a square). Tap or
   hover a bar or a square to see its total and which modules it went on.
   Everyone's module *list* stays private.
-- **The board** resets every Monday at midnight. It shows the podium, how far
-  you are from the next place, and the crew's recent sessions.
+- **The board** has three races: *Today* (resets at midnight), *This week*
+  (resets Monday at midnight) and *All time*. Each shows the podium, how far
+  you are from the next place, and the crew's recent sessions. It remembers
+  which one you last looked at.
 - **Location is opt-in.** Turn off *Share where I study* and it's hidden
   everywhere, including places already on past sessions.
 

@@ -138,11 +138,11 @@ export function clock(ms) {
   return `${Math.floor(s / 3600)}:${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 }
 
-/** Time until the weekly board resets, Monday 00:00 local. */
-export function untilReset(now = new Date()) {
+/** Time until the board resets: midnight for the day's, Monday 00:00 for the week's (local time). */
+export function untilReset(now = new Date(), period = "week") {
   const next = new Date(now);
   next.setHours(0, 0, 0, 0);
-  next.setDate(next.getDate() + ((8 - next.getDay()) % 7 || 7));
+  next.setDate(next.getDate() + (period === "day" ? 1 : (8 - next.getDay()) % 7 || 7));
   const minutes = Math.round((+next - +now) / 60000);
   const days = Math.floor(minutes / 1440), hours = Math.floor((minutes % 1440) / 60);
   return days ? `${days}d ${hours}h` : `${hours}h ${minutes % 60}m`;

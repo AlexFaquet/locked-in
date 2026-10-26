@@ -39,6 +39,7 @@ test("formatting", () => {
   assert.equal(clock(3729000), "1:02:09");
   assert.equal(untilReset(new Date(2026, 9, 25, 22, 30)), "1h 30m", "Sunday night: resets at midnight");
   assert.equal(untilReset(new Date(2026, 9, 26, 0, 0)), "7d 0h", "Monday at midnight: a whole week to go");
+  assert.equal(untilReset(new Date(2026, 9, 26, 13, 20), "day"), "10h 40m", "the day's board resets at midnight");
   const code = encodeLinkCode({ url: "https://x.supabase.co", key: "sb_publishable_1", link: "li_abc" });
   assert.deepEqual(JSON.parse(Buffer.from(code.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString()), { u: "https://x.supabase.co", k: "sb_publishable_1", l: "li_abc" });
 });

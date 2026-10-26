@@ -15,6 +15,7 @@ const MIN_SESSION_MS = 60000;
 const MAX_SESSION_MS = 16 * 3600000;
 const JOIN_KEY = "lockedin.join";
 const TAB_KEY = "lockedin.tab";
+const BOARD_KEY = "lockedin.board";
 // Linking another app is for whoever asks for it: open the app once with
 // ?link and that browser shows the option. Nobody else sees it.
 const LINKING_KEY = "lockedin.linking";
@@ -23,7 +24,7 @@ const ACTIVITY_KEY = "lockedin.activityView";
 
 const state = {
   user: null, me: null, crews: [], people: [], live: null, paused: null, breaks: [], liveRows: new Map(), feed: [], mine: [], keys: [], modules: [],
-  tab: readStored(TAB_KEY) || "now", board: "week", subject: "", place: "",
+  tab: readStored(TAB_KEY) || "now", board: readStored(BOARD_KEY) || "week", subject: "", place: "",
 };
 let channel = null;
 let refreshTimer = null;
@@ -700,22 +701,26 @@ function breakCard(row) {
         h("p", null, `On a break from ${row.paused_subject} · ${hm(row.banked_seconds / 60)} so far`))));
 }
 
+const BOARDS = { today: { label: "Today", key: "today_minutes", period: "day", total: "today" }, week: { label: "This week", key: "week_minutes", period: "week", total: "this week" }, all: { label: "All time", key: "total_minutes" } };
+
 function boardView() {
-  const key = state.board === "week" ? "week_minutes" : "total_minutes";
+  const board = BOARDS[state.board] || BOARDS.week;
+  const key = board.key;
   const ranked = standings(state.people, key);
-  const chase = chaseLine(ranked, state.user.id, key);
+  const crewTotal = ranked.reduce((sum, p) => sum + p[key], 0);
+  // An empty day is an open race, not a tie between everybody.
+  const chase = crewTotal ? chaseLine(ranked, state.user.id, key) : board.period === "day" ? "Nobody's on the board today yet. Lock in to take first." : null;
   const leader = Math.max(1, ...ranked.map((p) => p[key]));
   const spot = (p, place) => p
     ? personButton(p, `podium-spot ${place}`, h("span", { class: `avatar${p.live_started_at ? " is-live" : ""}` }, p.emoji), h("span", { class: "podium-name" }, p.name), h("span", { class: "podium-time" }, hm(p[key])),
       h("div", { class: "podium-block" }, place === "first" ? "1" : place === "second" ? "2" : "3"))
     : h("div", { class: `podium-spot ${place} empty-spot` }, h("span", { class: "avatar" }, "?"), h("span", { class: "podium-name" }, "—"), h("div", { class: "podium-block" }));
-  const crewTotal = ranked.reduce((sum, p) => sum + p[key], 0);
   return [
     h("section", { class: "card" },
       h("div", { class: "board-head" },
         h("div", { class: "toggle", role: "group", "aria-label": "Period" },
-          ...[["week", "This week"], ["all", "All time"]].map(([k, label]) => h("button", { "aria-pressed": String(state.board === k), onclick: () => { state.board = k; render(); } }, label))),
-        h("span", { class: "reset" }, state.board === "week" ? `Resets in ${untilReset()}` : `${hm(crewTotal)} together`)),
+          ...Object.entries(BOARDS).map(([k, b]) => h("button", { "aria-pressed": String(board === b), onclick: () => { state.board = k; store(BOARD_KEY, k); render(); } }, b.label))),
+        h("span", { class: "reset" }, board.period ? `Resets in ${untilReset(new Date(), board.period)}` : `${hm(crewTotal)} together`)),
       h("div", { class: "podium" }, spot(ranked[1], "second"), spot(ranked[0], "first"), spot(ranked[2], "third")),
       chase ? h("div", { class: "chase" }, h("span", { "aria-hidden": "true" }, "🎯"), h("span", null, chase)) : null,
       h("ol", { class: "ranks" }, ranked.map((p) => h("li", null, personButton(p, `rank-row${p.user_id === state.user.id ? " is-me" : ""}`,
@@ -725,7 +730,7 @@ function boardView() {
           h("strong", null, h("span", null, p.name), p.live_started_at ? h("i", { class: "live-dot", title: "Locked in now" }) : null, p.streak ? h("em", { class: "flame" }, `🔥${p.streak}`) : null),
           h("div", { class: "rank-bar" }, h("span", { style: { width: `${Math.max(3, (p[key] / leader) * 100)}%` } }))),
         h("span", { class: "rank-time" }, hm(p[key]))))))),
-    state.board === "week" ? h("p", { class: "small muted", style: { textAlign: "center", margin: "12px 0 0" } }, `Crew total this week: ${hm(crewTotal)}`) : null,
+    board.total ? h("p", { class: "small muted", style: { textAlign: "center", margin: "12px 0 0" } }, `Crew total ${board.total}: ${hm(crewTotal)}`) : null,
     h("section", { class: "section" },
       h("div", { class: "section-head" }, h("h2", null, "Recent sessions")),
       h("div", { class: "card" }, state.feed.length ? state.feed.map((s) => {
