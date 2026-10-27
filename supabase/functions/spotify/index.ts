@@ -16,7 +16,7 @@ import { createClient } from "npm:@supabase/supabase-js@2.117.3";
 import { nowPlaying } from "./playing.ts";
 
 // The Spotify app's Client ID. Public by design: this sign-in (PKCE) needs no secret.
-const CLIENT_ID = "";
+const CLIENT_ID = "a35d1dba25a641118f9d363e5cdf449b";
 const APP_URL = "https://alexfaquet.github.io/locked-in/";
 // Must match the Redirect URI saved in the Spotify app exactly.
 const SELF = "https://dmuzyednlvftkoxqhzed.supabase.co/functions/v1/spotify";
