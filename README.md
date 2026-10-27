@@ -35,7 +35,8 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
   a switch just relabels the timer (wrong button). Resuming from a break lets
   you pick the module too.
 - **Fix the times.** *Edit* under the running clock changes its module, when
-  you really started, or where you are. In Me → *Your sessions*, ✎ changes a
+  you really started, or where you are. If you forgot to stop it, set
+  *Stopped at* and it ends there, as if you'd pressed Done then. In Me → *Your sessions*, ✎ changes a
   saved session's module, day and times, and *+ Log one* adds one you forgot
   to time. Nothing can overlap another session, end in the future or run
   past 16 hours, and the board updates to match.

@@ -1222,7 +1222,15 @@ function timingProblem(start, end) {
   return null;
 }
 
-/** Fix the timer that's running: the module, when you really started, or where you are. */
+/** The latest moment, up to now, that it was this o'clock ("HH:MM"). */
+function lastTimeAt(value, now = new Date()) {
+  const [hours, minutes] = value.split(":").map(Number);
+  const at = new Date(now); at.setHours(hours, minutes, 0, 0);
+  if (at > now) at.setDate(at.getDate() - 1);
+  return at;
+}
+
+/** Fix the timer that's running: the module, when you really started, where you are, or when you stopped and forgot to say. */
 function editTimerSheet() {
   const live = state.live;
   if (!live) return;
@@ -1230,37 +1238,41 @@ function editTimerSheet() {
   const subject = h("select", { class: "input" }, names.map((name) => h("option", { value: name, selected: name === live.subject }, name)));
   const from = h("input", { class: "input", type: "time", value: timeOf(live.started_at) });
   const place = h("input", { class: "input", maxlength: 80, value: live.location || "", placeholder: "Main Library, café, home…" });
-  sheet((box, close) => box.append(
+  const save = h("button", { class: "btn" }, "Save");
+  const to = h("input", { class: "input", type: "time", "aria-describedby": "stopped-hint", oninput: () => { save.textContent = to.value ? "Save and stop" : "Save"; } });
+  save.addEventListener("click", async () => {
+    if (!from.value) return toast("Pick when you started.", { bad: true });
+    const now = new Date();
+    // An unchanged time keeps its seconds; a changed one is the latest time it's been that o'clock.
+    const start = from.value === timeOf(live.started_at) ? new Date(live.started_at) : lastTimeAt(from.value, now);
+    const end = to.value ? lastTimeAt(to.value, now) : null;
+    if (end && end <= start) return toast(`That's before you started, at ${timeOf(start)}.`, { bad: true });
+    if (end && +end - +start < MIN_SESSION_MS) return toast("A session needs at least a minute.", { bad: true });
+    if (+(end || now) - +start > MAX_SESSION_MS) return toast(end ? "Keep a session under 16 hours." : "A timer can go back 16 hours at most.", { bad: true });
+    // The database only checks sessions against each other, so check the running one here.
+    const clash = state.mine.find((s) => +new Date(s.ended_at) > +start && +new Date(s.started_at) < +(end || now));
+    if (clash) return toast(`That would overlap your ${clash.subject} session, which ended at ${timeOf(clash.ended_at)}.`, { bad: true });
+    const row = { subject: subject.value, started_at: start.toISOString(), ...(state.me.share_location ? { location: place.value.trim() || null } : {}) };
+    // Only this timer: if it was stopped or replaced on another device, nothing changes.
+    const { data, error } = await db.from("live").update(row).eq("user_id", state.user.id).eq("session_id", live.session_id)
+      .select("session_id, subject, started_at, location, banked_seconds");
+    if (error) return oops(error);
+    if (!data?.length) { close(); await refresh(); render(); return toast("That timer isn't running any more.", { bad: true }); }
+    state.live = { ...live, ...data[0] };
+    close();
+    if (end) return finish({ end });
+    render(); refreshSoon();
+    toast("Timer updated.");
+  });
+  const close = sheet((box, close) => box.append(
     h("h2", null, "Edit your timer"),
-    h("p", { class: "muted", style: { marginTop: "4px" } }, "Wrong module, or started before you pressed the button? Fix it here."),
+    h("p", { class: "muted", style: { marginTop: "4px" } }, "Wrong module, started before you pressed the button, or forgot to stop? Fix it here."),
     h("label", { class: "field" }, h("span", { class: "label" }, "Module"), subject),
     h("label", { class: "field" }, h("span", { class: "label" }, "Started at"), from),
+    h("label", { class: "field" }, h("span", { class: "label" }, "Stopped at"), to,
+      h("span", { id: "stopped-hint", class: "small muted", style: { display: "block", marginTop: "6px" } }, "Forgot to stop it? Set when you did and it ends there. Leave it empty to keep going.")),
     state.me.share_location ? h("label", { class: "field" }, h("span", { class: "label" }, "Where (your crew sees this)"), place) : null,
-    h("div", { class: "btn-row" }, h("button", { class: "btn btn-soft", onclick: close }, "Cancel"),
-      h("button", { class: "btn", onclick: async () => {
-        if (!from.value) return toast("Pick when you started.", { bad: true });
-        const now = new Date();
-        let start = new Date(live.started_at);
-        // An unchanged time keeps its seconds; a changed one is the latest time it's been that o'clock.
-        if (from.value !== timeOf(live.started_at)) {
-          const [hours, minutes] = from.value.split(":").map(Number);
-          start = new Date(now); start.setHours(hours, minutes, 0, 0);
-          if (start > now) start.setDate(start.getDate() - 1);
-        }
-        if (+now - +start > MAX_SESSION_MS) return toast("A timer can go back 16 hours at most.", { bad: true });
-        // The database only checks sessions against each other, so check the running one here.
-        const clash = state.mine.find((s) => +new Date(s.ended_at) > +start && +new Date(s.started_at) < +now);
-        if (clash) return toast(`That would overlap your ${clash.subject} session, which ended at ${timeOf(clash.ended_at)}.`, { bad: true });
-        const row = { subject: subject.value, started_at: start.toISOString(), ...(state.me.share_location ? { location: place.value.trim() || null } : {}) };
-        // Only this timer: if it was stopped or replaced on another device, nothing changes.
-        const { data, error } = await db.from("live").update(row).eq("user_id", state.user.id).eq("session_id", live.session_id)
-          .select("session_id, subject, started_at, location, banked_seconds");
-        if (error) return oops(error);
-        if (!data?.length) { close(); await refresh(); render(); return toast("That timer isn't running any more.", { bad: true }); }
-        state.live = { ...live, ...data[0] };
-        close(); render(); refreshSoon();
-        toast("Timer updated.");
-      } }, "Save"))));
+    h("div", { class: "btn-row" }, h("button", { class: "btn btn-soft", onclick: close }, "Cancel"), save)));
 }
 
 /** The database's refusals, in words. */
