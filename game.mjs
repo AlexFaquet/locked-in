@@ -132,6 +132,19 @@ export const sittingMs = (row, now = Date.now()) =>
 export const onBreak = (row, limit, now = Date.now()) =>
   Boolean(row?.paused_at && !row.started_at && now - +new Date(row.paused_at) < limit);
 
+/** How long a timer can run untouched before it asks "Still locked in?" and crewmates stop seeing it. Matches private.hidden_from. */
+export const STILL_THERE_MS = 3 * 3600000;
+
+/** When a running timer goes unconfirmed: 3 hours after its stretch started or its owner last said "still here". Null if nothing's running. */
+export const hiddenFrom = (row) =>
+  row?.started_at ? Math.max(+new Date(row.started_at), row.checked_at ? +new Date(row.checked_at) : 0) + STILL_THERE_MS : null;
+
+/** A running timer that's waiting for its owner to say they're still there. */
+export const unconfirmed = (row, now = Date.now()) => {
+  const at = hiddenFrom(row);
+  return at !== null && now >= at;
+};
+
 /** "1:02:09" for a running timer. */
 export function clock(ms) {
   const s = Math.max(0, Math.floor(ms / 1000));

@@ -40,6 +40,12 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
   saved session's module, day and times, and *+ Log one* adds one you forgot
   to time. Nothing can overlap another session, end in the future or run
   past 16 hours, and the board updates to match.
+- **Still locked in?** A timer nobody has touched for 3 hours (since it
+  started, a switch, a resume, an edit or the last "yes") asks if you're
+  still there. It keeps running either way, but until you answer your crew
+  doesn't see you as live and the board stops counting at the 3-hour mark.
+  *Yes, still going* puts it all back; *I stopped earlier* opens Edit, where
+  *Stopped at* saves what you really did.
 - **Earn XP** — a point a minute. Levels get steeper (Level 2 at 2.5 hours,
   Level 5 at 40, Level 10 at 202.5). Streaks count days with 30+ minutes;
   badges are for early starts, late nights, long sessions and milestones.

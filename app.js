@@ -6,7 +6,7 @@
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/+esm";
 import { SUPABASE_URL, SUPABASE_KEY, MUSIC } from "./config.js";
-import { levelProgress, streakFrom, badgesFor, standings, chaseLine, hm, clock, untilReset, ago, localDay, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS } from "./game.mjs";
+import { levelProgress, streakFrom, badgesFor, standings, chaseLine, hm, clock, untilReset, ago, localDay, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, hiddenFrom, unconfirmed } from "./game.mjs";
 
 const db = createClient(SUPABASE_URL, SUPABASE_KEY);
 const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/London";
@@ -28,6 +28,10 @@ const state = {
 };
 let channel = null;
 let refreshTimer = null;
+// Wakes the app when the next running timer goes 3 hours untouched (see scheduleStillThere).
+let stillThereTimer = null;
+// The unconfirmed stretch "Still locked in?" was last asked about, so closing it doesn't bring it straight back.
+let stillThereAsked = null;
 
 /* ------------------------------------------------------------
    Small helpers — every string goes in as text, never markup
@@ -337,7 +341,7 @@ async function refresh() {
   const [stats, live, feed, mine, keys, modules] = await Promise.all([
     db.rpc("room_stats", { p_tz: TZ }),
     // Yours and your crewmates', as the database allows: who's studying, who's on a break.
-    db.from("live").select("user_id, session_id, subject, started_at, location, paused_at, paused_subject, banked_seconds, now_playing"),
+    db.from("live").select("user_id, session_id, subject, started_at, location, paused_at, paused_subject, banked_seconds, now_playing, checked_at"),
     db.from("sessions").select("id, user_id, subject, started_at, ended_at, location").order("ended_at", { ascending: false }).limit(25),
     db.from("sessions").select("id, subject, started_at, ended_at, location").eq("user_id", uid).gte("started_at", new Date(Date.now() - 70 * 86400000).toISOString()).order("started_at", { ascending: false }).limit(400),
     db.from("link_keys").select("id, label, created_at, last_used_at").order("created_at"),
@@ -357,6 +361,14 @@ async function refresh() {
   state.mine = mine.data || [];
   state.keys = keys.data || [];
   state.modules = modules.data || [];
+  scheduleStillThere();
+}
+
+/** Refresh when the next running timer goes 3 hours untouched: a crewmate's drops off the list, yours asks if you're still there. */
+function scheduleStillThere() {
+  clearTimeout(stillThereTimer);
+  const next = Math.min(...[...state.liveRows.values()].map(hiddenFrom).filter((at) => at > Date.now()));
+  if (Number.isFinite(next)) stillThereTimer = setTimeout(refreshSoon, next - Date.now() + 1000);
 }
 
 /* ------------------------------------------------------------
@@ -443,8 +455,8 @@ function subscribe() {
   channel = db.channel("crew")
     .on("postgres_changes", { event: "*", schema: "public", table: "live" }, ({ new: row }) => {
       const before = row?.user_id && byId(row.user_id);
-      // Coming back from a break isn't news; locking in is.
-      if (row?.started_at && !row.banked_seconds && row.user_id !== state.user.id && before && !before.live_started_at) {
+      // Coming back from a break, or saying "still here", isn't news; locking in is.
+      if (row?.started_at && !row.banked_seconds && !row.checked_at && row.user_id !== state.user.id && before && !before.live_started_at) {
         notify(`${before.emoji} ${before.name} just locked in on ${row.subject}${row.location ? ` at ${row.location}` : ""}`);
       }
       refreshSoon();
@@ -686,7 +698,45 @@ function askWhenStopped() {
     h("div", { class: "row", style: { marginTop: "16px" } }, day, time),
     h("div", { class: "btn-row" },
       h("button", { class: "btn btn-soft", onclick: () => { close(); finish({ discard: true }); } }, "Throw it away"),
-      h("button", { class: "btn", onclick: () => { close(); finish({ end: new Date(`${day.value}T${time.value}:00`) }); } }, "Save"))));
+      h("button", { class: "btn", onclick: () => { close(); finish({ end: new Date(`${day.value}T${time.value}:00`) }); } }, "Save"))), { key: "when-stopped" });
+}
+
+/* ------------------------------------------------------------
+   "Still locked in?" — after 3 hours untouched, a timer waits for its
+   owner to say so. Until then the crew doesn't see it and the board
+   stops counting at the 3-hour mark (the database does both); the
+   timer itself keeps running.
+   ------------------------------------------------------------ */
+
+/** Asks once per untouched stretch, when nothing else is open. Past 16 hours it can only be "when did you stop?". */
+function askIfStillThere() {
+  const live = state.live;
+  if (!live || !unconfirmed(live) || sheets.length) return;
+  const asking = `${live.session_id}@${hiddenFrom(live)}`;
+  if (stillThereAsked === asking) return;
+  stillThereAsked = asking;
+  if (Date.now() - +new Date(live.started_at) > MAX_SESSION_MS) return askWhenStopped();
+  const since = Math.max(+new Date(live.started_at), live.checked_at ? +new Date(live.checked_at) : 0);
+  const sinceText = `${new Date(since).toLocaleString("en-GB", { weekday: localDay(new Date(since)) === localDay(new Date()) ? undefined : "long", hour: "2-digit", minute: "2-digit" })}`;
+  sheet((box, close) => box.append(
+    h("h2", null, "Still locked in? 👀"),
+    h("p", { class: "muted", style: { marginTop: "6px" } }, `Your ${live.subject} timer hasn't been touched since ${sinceText}. It's still running, but at ${timeOf(hiddenFrom(live))} your crew stopped seeing you and the board stopped counting. Say you're still here and it all counts again.`),
+    h("div", { class: "btn-row" },
+      h("button", { class: "btn btn-soft", onclick: () => { close(); editTimerSheet(); } }, "I stopped earlier"),
+      h("button", { class: "btn", onclick: () => { close(); stillHere(); } }, "Yes, still going"))), { key: "still-there" });
+}
+
+/** "Yes, still going": seen and counted again, and asked again in 3 hours. */
+async function stillHere() {
+  const live = state.live;
+  if (!live) return;
+  // Only this timer: if it was stopped or replaced on another device, nothing changes.
+  const { data, error } = await db.from("live").update({ checked_at: new Date().toISOString() }).eq("user_id", state.user.id).eq("session_id", live.session_id).select("checked_at");
+  if (error) return oops(error);
+  if (!data?.length) { await refresh(); render(); return toast("That timer isn't running any more.", { bad: true }); }
+  state.live = { ...live, checked_at: data[0].checked_at };
+  render(); refreshSoon();
+  toast("Your crew can see you again 🔒");
 }
 
 /* ------------------------------------------------------------
@@ -710,6 +760,7 @@ function render() {
     h("main", null, (views[state.tab] || nowView)()),
     h("nav", { class: "tabs", "aria-label": "Sections" }, tab("now", "⏱️", "Now"), tab("board", "🏆", "Board"), tab("me", state.me.emoji, "Me")));
   tick();
+  askIfStillThere();
 }
 
 function nowView() {
@@ -764,11 +815,17 @@ const sittingClock = (row, className) => h("div", { class: className, dataset: {
 
 function runningCard() {
   const live = state.live;
-  return h("section", { class: "card running" },
-    h("span", { class: "running-tag" }, "LOCKED IN"),
+  const waiting = unconfirmed(live);
+  return h("section", { class: `card running${waiting ? " is-unconfirmed" : ""}` },
+    h("span", { class: "running-tag" }, waiting ? "STILL LOCKED IN?" : "LOCKED IN"),
     h("h2", null, live.subject),
     sittingClock(live, "big-clock"),
     h("div", { class: "xp-tick" }, "⭐️ +", h("span", { dataset: { xpSince: live.started_at, banked: live.banked_seconds || 0 } }, String(Math.floor(sittingMs(live) / 60000))), " XP"),
+    waiting ? h("div", { class: "still-there" },
+      h("p", null, `🙈 Your crew stopped seeing you at ${timeOf(hiddenFrom(live))}, 3 hours after you last touched this timer.`),
+      h("div", { class: "btn-row" },
+        h("button", { class: "btn btn-soft", onclick: () => editTimerSheet() }, "I stopped earlier"),
+        h("button", { class: "btn", onclick: () => stillHere() }, "Yes, still going"))) : null,
     live.location ? h("p", { class: "running-where" }, "📍 ", live.location) : null,
     playingLine(live.now_playing),
     switchChips(live.subject),
@@ -1252,10 +1309,11 @@ function editTimerSheet() {
     // The database only checks sessions against each other, so check the running one here.
     const clash = state.mine.find((s) => +new Date(s.ended_at) > +start && +new Date(s.started_at) < +(end || now));
     if (clash) return toast(`That would overlap your ${clash.subject} session, which ended at ${timeOf(clash.ended_at)}.`, { bad: true });
-    const row = { subject: subject.value, started_at: start.toISOString(), ...(state.me.share_location ? { location: place.value.trim() || null } : {}) };
+    // Editing it counts as being here.
+    const row = { subject: subject.value, started_at: start.toISOString(), checked_at: now.toISOString(), ...(state.me.share_location ? { location: place.value.trim() || null } : {}) };
     // Only this timer: if it was stopped or replaced on another device, nothing changes.
     const { data, error } = await db.from("live").update(row).eq("user_id", state.user.id).eq("session_id", live.session_id)
-      .select("session_id, subject, started_at, location, banked_seconds");
+      .select("session_id, subject, started_at, location, banked_seconds, checked_at");
     if (error) return oops(error);
     if (!data?.length) { close(); await refresh(); render(); return toast("That timer isn't running any more.", { bad: true }); }
     state.live = { ...live, ...data[0] };

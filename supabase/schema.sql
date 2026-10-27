@@ -79,6 +79,8 @@ create table public.live (
   banked_seconds integer not null default 0 check (banked_seconds >= 0),
   -- What they're playing (through Last.fm), written only by the music edge function (see Music below).
   now_playing jsonb,
+  -- When its owner last said "still here" (or edited the timer); see private.hidden_from.
+  checked_at timestamptz,
   updated_at timestamptz not null default now(),
   constraint live_shape check ((started_at is null) = (subject is null) and (started_at is null) = (session_id is null)),
   constraint live_pause_shape check ((paused_at is null) = (paused_subject is null) and (paused_at is null or started_at is null))
@@ -133,9 +135,22 @@ as $$
   )
 $$;
 
+-- "Still locked in?": when a running timer goes unconfirmed, 3 hours after
+-- its stretch started (a switch or a resume counts as touching it) or its
+-- owner last said "still here". Null when nothing's running. From then until
+-- they answer, crewmates don't see them as live and the board stops counting
+-- the timer (private.stats_for); the timer itself keeps running. Matches
+-- STILL_THERE_MS in game.mjs.
+create function private.hidden_from(p_started timestamptz, p_checked timestamptz)
+returns timestamptz
+language sql stable set search_path = ''
+as $$
+  select case when p_started is not null then greatest(p_started, p_checked) + interval '3 hours' end
+$$;
+
 -- Postgres grants EXECUTE to PUBLIC on every new function; take that back.
-revoke execute on function private.my_crews(), private.shares_crew(uuid) from public, anon;
-grant execute on function private.my_crews(), private.shares_crew(uuid) to authenticated;
+revoke execute on function private.my_crews(), private.shares_crew(uuid), private.hidden_from(timestamptz, timestamptz) from public, anon;
+grant execute on function private.my_crews(), private.shares_crew(uuid), private.hidden_from(timestamptz, timestamptz) to authenticated;
 
 /* ------------------------------------------------------------
    Row-level security
@@ -202,8 +217,8 @@ grant select on public.crews to authenticated;
 grant select, delete on public.crew_members to authenticated;
 grant select on public.live to authenticated;
 -- Every column but now_playing, so nobody can put a fake track on the board.
-grant insert (user_id, session_id, subject, started_at, location, paused_at, paused_subject, banked_seconds) on public.live to authenticated;
-grant update (user_id, session_id, subject, started_at, location, paused_at, paused_subject, banked_seconds) on public.live to authenticated;
+grant insert (user_id, session_id, subject, started_at, location, paused_at, paused_subject, banked_seconds, checked_at) on public.live to authenticated;
+grant update (user_id, session_id, subject, started_at, location, paused_at, paused_subject, banked_seconds, checked_at) on public.live to authenticated;
 grant select, insert on public.pings to authenticated;
 grant insert, delete on public.link_keys to authenticated;
 -- user_id is needed by the delete policy; key_hash is never readable.
@@ -249,9 +264,14 @@ begin
   if new.started_at is null and new.paused_at is null then
     new.banked_seconds := 0;
   end if;
-  -- Music shows only while you're studying.
+  -- Music and "still here" only mean anything while you're studying.
   if new.started_at is null then
     new.now_playing := null;
+    new.checked_at := null;
+  end if;
+  -- Nobody can be "still here" in the future.
+  if new.checked_at > now() then
+    new.checked_at := now();
   end if;
   return new;
 end $$;
@@ -390,7 +410,8 @@ as $$
   timed as (
     select s.user_id, s.started_at, s.ended_at from public.sessions s where s.user_id in (select id from people)
     union all
-    select l.user_id, l.started_at, greatest(now(), l.started_at) from public.live l
+    -- A running timer counts up to now, or only up to when it went unconfirmed.
+    select l.user_id, l.started_at, least(greatest(now(), l.started_at), private.hidden_from(l.started_at, l.checked_at)) from public.live l
     where l.started_at is not null and l.user_id in (select id from people)
   )
   select
@@ -414,7 +435,9 @@ as $$
   from people pe
   join public.profiles pr on pr.id = pe.id
   cross join bounds b
+  -- Someone waiting on "still here" shows as live only to themselves.
   left join public.live l on l.user_id = pr.id and l.started_at is not null
+    and (pr.id = p_user or private.hidden_from(l.started_at, l.checked_at) > now())
 $$;
 revoke execute on function private.stats_for(uuid, text) from public, anon;
 grant execute on function private.stats_for(uuid, text) to authenticated;

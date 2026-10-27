@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { levelFor, levelProgress, minutesForLevel, streakFrom, badgesFor, standings, chaseLine, hm, clock, untilReset, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS } from "../game.mjs";
+import { levelFor, levelProgress, minutesForLevel, streakFrom, badgesFor, standings, chaseLine, hm, clock, untilReset, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, STILL_THERE_MS, hiddenFrom, unconfirmed } from "../game.mjs";
 
 test("levels get steeper and the bar measures progress inside one", () => {
   assert.deepEqual([0, 149, 150, 599, 600, 2400, 12150].map(levelFor), [1, 1, 2, 2, 3, 5, 10]);
@@ -79,4 +79,22 @@ test("a paused sitting keeps its time, and a break only lasts so long", () => {
   assert.equal(onBreak(paused, BREAK_SHOWN_MS, now + 3 * 3600000), false, "crewmates stop seeing an old break");
   assert.equal(onBreak(paused, BREAK_KEPT_MS, now + 3 * 3600000), true, "but you can still resume it");
   assert.equal(onBreak(running, BREAK_KEPT_MS, now), false, "studying isn't a break");
+});
+
+test("a timer untouched for 3 hours asks if you're still there", () => {
+  const start = Date.parse("2026-10-27T14:00:00Z");
+  const row = { started_at: "2026-10-27T14:00:00Z", checked_at: null };
+  assert.equal(hiddenFrom(row), start + STILL_THERE_MS);
+  assert.equal(unconfirmed(row, start + STILL_THERE_MS - 1000), false);
+  assert.equal(unconfirmed(row, start + STILL_THERE_MS), true);
+  // Saying "still here" at 17:30 gives it until 20:30.
+  const checked = { ...row, checked_at: "2026-10-27T17:30:00Z" };
+  assert.equal(unconfirmed(checked, Date.parse("2026-10-27T20:00:00Z")), false);
+  assert.equal(unconfirmed(checked, Date.parse("2026-10-27T20:30:00Z")), true);
+  // A new stretch (a switch, or back from a break) counts as touching it, even with an older "still here".
+  const switched = { started_at: "2026-10-27T19:00:00Z", checked_at: "2026-10-27T17:30:00Z" };
+  assert.equal(hiddenFrom(switched), Date.parse("2026-10-27T22:00:00Z"));
+  // Nothing running, nothing to ask.
+  assert.equal(hiddenFrom({ started_at: null, paused_at: "2026-10-27T14:00:00Z" }), null);
+  assert.equal(unconfirmed(null), false);
 });

@@ -150,9 +150,15 @@ p { margin: 0; }
 .switch-to .chip { font-size: 14px; padding: 7px 12px; }
 .running-actions .btn { flex: 1; margin-top: 0; }
 /* On a break: gold instead of green, and the clock stands still. */
-.running.is-paused { border-color: var(--gold-press); box-shadow: 0 5px 0 var(--gold-press); background: radial-gradient(120% 90% at 50% 0%, color-mix(in srgb, var(--gold) 24%, var(--card)), var(--card) 70%); }
-.is-paused .running-tag { background: var(--gold); color: #1e1b2e; }
+.running.is-paused, .running.is-unconfirmed { border-color: var(--gold-press); box-shadow: 0 5px 0 var(--gold-press); background: radial-gradient(120% 90% at 50% 0%, color-mix(in srgb, var(--gold) 24%, var(--card)), var(--card) 70%); }
+.is-paused .running-tag, .is-unconfirmed .running-tag { background: var(--gold); color: #1e1b2e; }
 .is-paused .running-tag::before { background: #1e1b2e; animation: none; }
+.is-unconfirmed .running-tag::before { background: #1e1b2e; }
+/* "Still locked in?": the timer runs on, hidden from the crew until you answer. */
+.still-there { margin-top: 16px; padding: 14px; border-radius: 16px; background: var(--sunk); }
+.still-there p { color: var(--ink-2); font-weight: 700; font-size: 15px; }
+.still-there .btn-row { display: flex; gap: 10px; }
+.still-there .btn { flex: 1; margin-top: 12px; padding-inline: 10px; }
 .is-paused .big-clock { color: var(--ink-2); }
 .break-for { color: var(--ink-2); font: 600 16px var(--display); font-variant-numeric: tabular-nums; }
 
