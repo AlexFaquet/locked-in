@@ -23,7 +23,7 @@ const SKIPPED_MODULES_KEY = "lockedin.skippedModules";
 const ACTIVITY_KEY = "lockedin.activityView";
 
 const state = {
-  user: null, me: null, crews: [], people: [], live: null, paused: null, breaks: [], liveRows: new Map(), music: null, feed: [], mine: [], keys: [], modules: [],
+  user: null, me: null, crews: [], people: [], live: null, paused: null, breaks: [], liveRows: new Map(), music: null, feed: [], mine: [], keys: [], watchers: [], modules: [],
   tab: readStored(TAB_KEY) || "now", board: readStored(BOARD_KEY) || "week", subject: "", place: "",
 };
 let channel = null;
@@ -274,6 +274,10 @@ function shareInvite(crew) {
 const app = () => document.getElementById("app");
 
 async function boot() {
+  // A watch link (#watch=…) is a read-only page for someone without an account. The secret stays in the
+  // fragment, so it never reaches a server log or another site's Referer.
+  const watching = new URLSearchParams(location.hash.slice(1)).get("watch");
+  if (watching) return watchPage(watching);
   const params = new URLSearchParams(location.search);
   const join = params.get("join");
   if (join) try { sessionStorage.setItem(JOIN_KEY, join.toUpperCase()); } catch (_) {}
@@ -338,7 +342,7 @@ async function loadCrews() {
 
 async function refresh() {
   const uid = state.user.id;
-  const [stats, live, feed, mine, keys, modules] = await Promise.all([
+  const [stats, live, feed, mine, keys, modules, watchers] = await Promise.all([
     db.rpc("room_stats", { p_tz: TZ }),
     // Yours and your crewmates', as the database allows: who's studying, who's on a break.
     db.from("live").select("user_id, session_id, subject, started_at, location, paused_at, paused_subject, banked_seconds, now_playing, checked_at"),
@@ -346,10 +350,11 @@ async function refresh() {
     db.from("sessions").select("id, subject, started_at, ended_at, location").eq("user_id", uid).gte("started_at", new Date(Date.now() - 70 * 86400000).toISOString()).order("started_at", { ascending: false }).limit(400),
     db.from("link_keys").select("id, label, created_at, last_used_at").order("created_at"),
     db.rpc("my_subject_stats", { p_tz: TZ }),
+    db.from("watch_links").select("id, label, created_at, last_seen_at").order("created_at"),
     loadCrews(),
   ]);
   if (MUSIC) db.rpc("my_music").then(({ data }) => { if (data) { const changed = JSON.stringify(data) !== JSON.stringify(state.music); state.music = data; if (changed && state.tab === "me") keepFocus(render); } });
-  const failed = [stats, live, feed, mine, keys, modules].find((r) => r.error);
+  const failed = [stats, live, feed, mine, keys, modules, watchers].find((r) => r.error);
   if (failed) return oops(failed.error, "Couldn't load your crew.");
   state.people = stats.data || [];
   state.liveRows = new Map((live.data || []).map((row) => [row.user_id, row]));
@@ -360,6 +365,7 @@ async function refresh() {
   state.feed = feed.data || [];
   state.mine = mine.data || [];
   state.keys = keys.data || [];
+  state.watchers = watchers.data || [];
   state.modules = modules.data || [];
   scheduleStillThere();
 }
@@ -1124,14 +1130,17 @@ function openProfile(userId) {
         if (!box.isConnected) return;
         if (error) return pending.replaceChildren("Couldn't load their activity. Close and try again.");
         pending.replaceWith(activityCard(person, sessions || [], "Activity"));
-        badges.after(h("section", { class: "section" },
-          h("div", { class: "section-head" }, h("h2", null, "Recent sessions")),
-          h("div", { class: "card" }, (sessions || []).length ? sessions.slice(0, 6).map((s) => h("div", { class: "session-row" },
-            h("div", null, h("p", null, s.subject), h("small", null, [`${new Date(s.started_at).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })} ${timeOf(s.started_at)}–${timeOf(s.ended_at)}`, s.location].filter(Boolean).join(" · "))),
-            h("strong", { class: "feed-time" }, hm(minutesBetween(s.started_at, s.ended_at))))) : h("p", { class: "empty" }, `${person.name} hasn't logged anything recently.`))));
+        badges.after(recentSessions(sessions || [], person.name));
       });
   }, { key: `profile:${userId}` });
 }
+
+/** Someone's last few sessions: module, when, how long, and where if they share it. */
+const recentSessions = (sessions, name, count = 6) => h("section", { class: "section" },
+  h("div", { class: "section-head" }, h("h2", null, "Recent sessions")),
+  h("div", { class: "card" }, sessions.length ? sessions.slice(0, count).map((s) => h("div", { class: "session-row" },
+    h("div", null, h("p", null, s.subject), h("small", null, [`${new Date(s.started_at).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })} ${timeOf(s.started_at)}–${timeOf(s.ended_at)}`, s.location].filter(Boolean).join(" · "))),
+    h("strong", { class: "feed-time" }, hm(minutesBetween(s.started_at, s.ended_at))))) : h("p", { class: "empty" }, `${name} hasn't logged anything recently.`)));
 
 /** Anywhere a person appears, tapping them opens their profile. */
 const personButton = (p, className, ...kids) => h("button", { type: "button", class: `person-btn ${className}`, "aria-label": `${p.name}'s profile`, onclick: (ev) => { ev.stopPropagation(); openProfile(p.user_id); } }, ...kids);
@@ -1160,6 +1169,7 @@ function settingsCard() {
       h("div", { class: "crew-actions" },
         h("button", { class: "btn btn-small", onclick: () => shareInvite(c) }, "Invite"),
         h("button", { class: "link", onclick: () => leaveCrew(c) }, "Leave"))))),
+    watchersCard(),
     linkingCard(),
     h("div", { class: "card", style: { marginTop: "16px" } },
       h("p", { class: "small muted" }, "Your account lives on the devices you've added. Before clearing this browser's data, add another device so you don't lose it. On a phone, Share → Add to Home Screen keeps it handy."),
@@ -1216,6 +1226,105 @@ async function pairWith(code) {
   if (error) throw error;
   // Start clean as the account this device has just become.
   location.reload();
+}
+
+/* ------------------------------------------------------------
+   Watch links: a read-only page of just you, for someone without
+   an account (family, say). Never where you are, never your crew.
+   ------------------------------------------------------------ */
+
+function watchersCard() {
+  return [
+    h("div", { class: "section-head", style: { marginTop: "26px" } }, h("h2", null, "Let someone watch")),
+    h("div", { class: "card" },
+      h("p", { class: "small" }, "A link for family, or anyone without an account. It shows whether you're studying now, on what, and how long you've studied. Never where, and nothing about your crew."),
+      state.watchers.map((w) => h("div", { class: "setting" },
+        h("div", null, h("strong", null, w.label), h("small", null, w.last_seen_at ? `Last looked ${ago(w.last_seen_at)}` : "Not opened yet")),
+        h("button", { class: "link", onclick: () => stopWatchLink(w) }, "Turn off"))),
+      h("button", { class: "btn btn-small btn-soft", style: { marginTop: "12px" }, onclick: makeWatchLink }, state.watchers.length ? "Make another link" : "Make a link")),
+  ];
+}
+
+function makeWatchLink() {
+  const label = h("input", { class: "input", maxlength: 30, placeholder: "Mum and Dad", autocomplete: "off" });
+  sheet((box, close) => box.append(
+    h("h2", null, "Let someone watch 👀"),
+    h("p", { class: "muted", style: { marginTop: "6px" } }, "They'll see whether you're studying now and how long you've studied, without needing an account."),
+    h("form", { onsubmit: async (ev) => {
+      ev.preventDefault();
+      const who = label.value.trim() || "Family";
+      const { data: token, error } = await db.rpc("create_watch_link", { p_label: who });
+      if (error) return oops(error);
+      close();
+      await refresh(); render();
+      showWatchLink(who, `${location.origin}${location.pathname}#watch=${token}`);
+    } },
+      h("label", { class: "field" }, h("span", { class: "label" }, "Who's it for?"), label),
+      h("div", { class: "btn-row" }, h("button", { class: "btn btn-soft", type: "button", onclick: close }, "Cancel"), h("button", { class: "btn", type: "submit" }, "Make link")))), { focus: label });
+}
+
+function showWatchLink(who, url) {
+  sheet((box, close) => box.append(
+    h("h2", null, `${who}'s link 🔗`),
+    h("p", { class: "muted", style: { marginTop: "6px" } }, "It's shown once, so send it now. Anyone with it can see your study time, so only give it to them. You can turn it off any time in Me."),
+    h("div", { class: "code-box" }, url),
+    "share" in navigator ? h("button", { class: "btn btn-block", style: { marginTop: "14px" }, onclick: () => navigator.share({ title: `${state.me.name} on Locked In`, url }).catch(() => {}) }, "Send it…") : null,
+    h("div", { class: "btn-row" }, h("button", { class: "btn btn-soft", onclick: () => copy(url, "Link copied.") }, "Copy link"), h("button", { class: "btn btn-soft", onclick: close }, "Done"))));
+}
+
+async function stopWatchLink(w) {
+  if (!confirm(`Turn off ${w.label}'s link? It stops working straight away.`)) return;
+  const { error } = await db.from("watch_links").delete().eq("id", w.id);
+  if (error) return oops(error);
+  await refresh(); render();
+  toast("Link turned off.");
+}
+
+/** The page a watch link opens: one person, read-only, checking in every minute. */
+async function watchPage(token) {
+  // Added to a phone's home screen, this page should open again, not the app's sign-up.
+  document.querySelector('link[rel="manifest"]')?.remove();
+  let shown = false;
+  async function load() {
+    const { data, error } = await db.rpc("watch_stats", { p_token: token, p_tz: TZ });
+    if (!error && data) { shown = true; return paintWatch(data); }
+    if (error?.code === "28000") return app().replaceChildren(h("main", { class: "welcome" },
+      h("div", { class: "welcome-lock", "aria-hidden": "true" }, "🔒"), h("h1", null, "This link is off"), h("p", null, error.message)));
+    // A blip while the page is already up: keep it, and try again next minute.
+    if (!shown) app().replaceChildren(h("main", { class: "welcome" },
+      h("div", { class: "welcome-lock", "aria-hidden": "true" }, "😵"), h("h1", null, "Couldn't connect"), h("p", null, "Check your connection and reload.")));
+  }
+  await load();
+  setInterval(() => { if (!document.hidden) load(); }, 60000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
+}
+
+function paintWatch({ person, live, paused_at: pausedAt, sessions }) {
+  const who = { ...EMPTY_STATS, ...person, live_subject: live?.subject ?? null, live_started_at: live?.started_at ?? null };
+  document.title = `${who.name} · Locked In`;
+  const last = sessions[0];
+  const today = `Today: ${who.today_minutes ? hm(who.today_minutes) : "nothing yet"}`;
+  const status = live
+    ? h("section", { class: "card running" },
+      h("span", { class: "running-tag" }, "STUDYING NOW"),
+      h("h2", null, live.subject),
+      sittingClock(live, "big-clock"),
+      h("p", { class: "running-where" }, today))
+    : h("section", { class: `card watch-status${pausedAt ? " is-break" : ""}` },
+      h("strong", null, pausedAt ? `☕ On a break since ${timeOf(pausedAt)}` : "Not studying right now"),
+      h("p", null, today),
+      !pausedAt && last ? h("small", null, `Last: ${last.subject}, ${new Date(last.ended_at).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })} ${timeOf(last.started_at)}–${timeOf(last.ended_at)}`) : null);
+  app().replaceChildren(
+    h("header", { class: "top" },
+      h("div", { class: "brand" }, h("span", { class: "brand-lock", "aria-hidden": "true" }, "🔒"), "Locked In"),
+      h("span", { class: "pill" }, "👀 Watching")),
+    h("main", { class: "watch" },
+      status,
+      heroCard(who),
+      activityCard(who, sessions, "Activity"),
+      recentSessions(sessions, who.name, 10),
+      h("p", { class: "small muted watch-note" }, `${who.name} shared this page with you. It keeps itself up to date, and ${who.name} can turn the link off at any time.`)));
+  tick();
 }
 
 /* ------------------------------------------------------------

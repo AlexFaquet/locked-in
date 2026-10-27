@@ -396,3 +396,12 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
   .person-btn:hover .avatar { transform: scale(1.05); }
   .wk-col:hover .wk-bar { filter: brightness(1.12) saturate(1.1); }
 }
+
+/* The watch page: one person, read-only. */
+.watch-status { text-align: center; padding: 22px 20px; }
+.watch-status strong { display: block; font: 600 22px var(--display); }
+.watch-status p { margin-top: 6px; font-weight: 800; color: var(--ink-2); }
+.watch-status small { display: block; margin-top: 4px; color: var(--muted); font-weight: 700; }
+.watch-status.is-break { border-color: var(--gold-press); box-shadow: 0 5px 0 var(--gold-press); }
+.watch .hero { margin-top: 16px; }
+.watch-note { margin: 22px 4px 8px; text-align: center; }

@@ -901,3 +901,83 @@ select cron.schedule('locked-in-music', '30 seconds', $job$
     select 1 from public.live l join private.music_links m on m.user_id = l.user_id
     where l.started_at is not null and m.lastfm is not null and m.problem is null)
 $job$);
+
+/* ------------------------------------------------------------
+   Watch links: a read-only page of one person's study for someone
+   without an account (family, say). It shows whether they're
+   studying now and how long, never where, and nothing about their
+   crew. Only a SHA-256 of the link's secret is stored; the link is
+   shown once, when it's made. The app opens it as #watch=<secret>.
+   ------------------------------------------------------------ */
+
+create table public.watch_links (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references public.profiles (id) on delete cascade,
+  label text not null default 'Family' check (char_length(btrim(label)) between 1 and 30),
+  token_hash text not null unique,
+  created_at timestamptz not null default now(),
+  last_seen_at timestamptz
+);
+create index watch_links_user_id_idx on public.watch_links (user_id);
+alter table public.watch_links enable row level security;
+
+create policy "see your own watch links" on public.watch_links for select to authenticated
+  using (user_id = (select auth.uid()));
+create policy "make your own watch links" on public.watch_links for insert to authenticated
+  with check (user_id = (select auth.uid()));
+create policy "turn off your own watch links" on public.watch_links for delete to authenticated
+  using (user_id = (select auth.uid()));
+
+revoke all on public.watch_links from anon, authenticated;
+grant insert, delete on public.watch_links to authenticated;
+-- token_hash is never readable.
+grant select (id, user_id, label, created_at, last_seen_at) on public.watch_links to authenticated;
+
+create function public.create_watch_link(p_label text default 'Family')
+returns text
+language plpgsql security invoker set search_path = ''
+as $$
+declare
+  v_token text := 'w_' || encode(extensions.gen_random_bytes(24), 'hex');
+begin
+  if (select auth.uid()) is null then raise exception 'Sign in first.' using errcode = '42501'; end if;
+  insert into public.watch_links (user_id, label, token_hash)
+  values ((select auth.uid()), coalesce(nullif(btrim(p_label), ''), 'Family'), encode(sha256(convert_to(v_token, 'UTF8')), 'hex'));
+  return v_token;
+end $$;
+revoke execute on function public.create_watch_link(text) from public, anon;
+grant execute on function public.create_watch_link(text) to authenticated;
+
+-- What a watch link shows. No account needed: the link's secret is the key.
+-- A timer waiting on "Still locked in?" shows as not studying, as it does to the crew.
+create function public.watch_stats(p_token text, p_tz text default 'Europe/London')
+returns jsonb
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_link record;
+begin
+  select w.id, w.user_id, w.last_seen_at into v_link
+  from public.watch_links w where w.token_hash = encode(sha256(convert_to(coalesce(p_token, ''), 'UTF8')), 'hex');
+  if v_link.id is null then raise exception 'This link has been turned off. Ask for a new one.' using errcode = '28000'; end if;
+  -- Pages check in every minute; a write every few minutes is plenty for "last looked".
+  if v_link.last_seen_at is null or v_link.last_seen_at < now() - interval '5 minutes' then
+    update public.watch_links set last_seen_at = now() where id = v_link.id;
+  end if;
+  return (
+    select jsonb_build_object(
+      'person', to_jsonb(st) - 'live_subject' - 'live_started_at' - 'live_location',
+      'live', (select jsonb_build_object('subject', l.subject, 'started_at', l.started_at, 'banked_seconds', l.banked_seconds)
+               from public.live l where l.user_id = v_link.user_id and private.hidden_from(l.started_at, l.checked_at) > now()),
+      'paused_at', (select l.paused_at from public.live l
+                    where l.user_id = v_link.user_id and l.started_at is null and l.paused_at > now() - interval '3 hours'),
+      'sessions', coalesce((select jsonb_agg(jsonb_build_object('subject', s.subject, 'started_at', s.started_at, 'ended_at', s.ended_at) order by s.started_at desc)
+                            from (select s.subject, s.started_at, s.ended_at from public.sessions s
+                                  where s.user_id = v_link.user_id and s.started_at > now() - interval '70 days'
+                                  order by s.started_at desc limit 400) s), '[]'::jsonb)
+    )
+    from private.stats_for(v_link.user_id, p_tz) st where st.user_id = v_link.user_id
+  );
+end $$;
+revoke execute on function public.watch_stats(text, text) from public;
+grant execute on function public.watch_stats(text, text) to anon, authenticated;
