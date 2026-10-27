@@ -52,13 +52,15 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
   (resets Monday at midnight) and *All time*. Each shows the podium, how far
   you are from the next place, and the crew's recent sessions. It remembers
   which one you last looked at.
-- **Music.** Connect Spotify in Me and your crew sees what you're playing
-  (song, artist, cover) while you're locked in, never otherwise. Spotify only
-  lets five people use a small app like this, each added by the app's owner
-  in Spotify's developer dashboard, and asks everyone to reconnect every six
-  months. The sign-in goes through the `spotify` edge function, which keeps
-  the tokens and checks everyone locked in every 30 seconds; nobody can set
-  a track themselves.
+- **Music.** Link Last.fm in Me and your crew sees what you're playing
+  (song, artist, cover) while you're locked in, never otherwise. It goes
+  through Last.fm because Spotify only lets five hand-added people use a
+  small app; Last.fm has no limit, and anyone can connect Spotify to it
+  themselves (Last.fm → Settings → Applications → Spotify Scrobbling). The
+  `music` edge function checks the name you link and asks Last.fm what
+  everyone locked in is playing every 30 seconds; nobody can set a track
+  themselves. It needs a Last.fm API key (last.fm/api/account/create) as the
+  function's `LASTFM_KEY` secret.
 - **Location is opt-in.** Turn off *Share where I study* and it's hidden
   everywhere, including places already on past sessions.
 

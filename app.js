@@ -5,7 +5,7 @@
 // with you), so this file never filters anything for privacy.
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/+esm";
-import { SUPABASE_URL, SUPABASE_KEY, SPOTIFY } from "./config.js";
+import { SUPABASE_URL, SUPABASE_KEY, MUSIC } from "./config.js";
 import { levelProgress, streakFrom, badgesFor, standings, chaseLine, hm, clock, untilReset, ago, localDay, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS } from "./game.mjs";
 
 const db = createClient(SUPABASE_URL, SUPABASE_KEY);
@@ -121,6 +121,8 @@ function sheet(build, { key = null, focus = null } = {}) {
   const already = key && sheets.find((s) => s.key === key);
   if (already) return already.close;
   const box = h("div", { class: "sheet", role: "dialog", "aria-modal": "true", tabindex: "-1" });
+  // Like h(): a child left out by a condition (null or false) is skipped, not shown as "null".
+  box.append = (...kids) => Element.prototype.append.apply(box, kids.flat(Infinity).filter((kid) => kid != null && kid !== false));
   const back = h("div", { class: "sheet-back", onclick: (ev) => { if (ev.target === back) close(); } }, box);
   const entry = { key, close, pushed: false };
   function close({ fromHistory = false } = {}) {
@@ -272,14 +274,9 @@ async function boot() {
   const join = params.get("join");
   if (join) try { sessionStorage.setItem(JOIN_KEY, join.toUpperCase()); } catch (_) {}
   if (params.has("link")) store(LINKING_KEY, "1");
-  const spotify = params.get("spotify");
-  if (join || params.has("link") || spotify) history.replaceState({}, "", location.pathname);
+  if (join || params.has("link")) history.replaceState({}, "", location.pathname);
   const { data } = await db.auth.getSession();
   state.user = data.session?.user || null;
-  // Back from Spotify's sign-in in a browser that isn't the one Locked In lives in
-  // (on iPhone, a home-screen app's sign-in opens separately): just say how it went.
-  if (spotify && !state.user) return spotifyDone(spotify);
-  if (spotify) setTimeout(() => toastSpotify(spotify), 600);
   if (!state.user) return welcome();
   const { data: me, error } = await db.from("profiles").select("*").eq("id", state.user.id).maybeSingle();
   if (error) return oops(error);
@@ -347,7 +344,7 @@ async function refresh() {
     db.rpc("my_subject_stats", { p_tz: TZ }),
     loadCrews(),
   ]);
-  if (SPOTIFY) db.rpc("my_music").then(({ data }) => { if (data) { const changed = JSON.stringify(data) !== JSON.stringify(state.music); state.music = data; if (changed && state.tab === "me") keepFocus(render); } });
+  if (MUSIC) db.rpc("my_music").then(({ data }) => { if (data) { const changed = JSON.stringify(data) !== JSON.stringify(state.music); state.music = data; if (changed && state.tab === "me") keepFocus(render); } });
   const failed = [stats, live, feed, mine, keys, modules].find((r) => r.error);
   if (failed) return oops(failed.error, "Couldn't load your crew.");
   state.people = stats.data || [];
@@ -464,65 +461,65 @@ function subscribe() {
 }
 
 /* ------------------------------------------------------------
-   Spotify — what people are playing while they're locked in.
-   The spotify edge function does the sign-in, keeps the tokens and
-   checks everyone locked in every 30 seconds; this only shows it.
+   Music — what people are playing while they're locked in.
+   It comes through Last.fm: the music edge function checks the name
+   you link and asks Last.fm every 30 seconds; this only shows it.
    ------------------------------------------------------------ */
 
-const SPOTIFY_RESULTS = {
-  connected: ["Spotify connected 🎧 Your crew sees what you play while you're locked in.", false],
-  cancelled: ["Spotify wasn't connected.", false],
-  expired: ["That Spotify sign-in took too long. Try again from Me.", true],
-  failed: ["Spotify didn't connect. Try again from Me.", true],
-  "not-listed": ["Spotify hasn't let your account in yet. Ask whoever runs Locked In to add the email you use for Spotify.", true],
-};
-
-function toastSpotify(result) {
-  const [text, bad] = SPOTIFY_RESULTS[result] || SPOTIFY_RESULTS.failed;
-  toast(text, { bad, ms: 6000 });
-  if (result === "connected" && state.me) refreshSoon();
-}
-
-/** The sign-in finished in a different browser from the app's (an iPhone home-screen app): say so and send them back. */
-function spotifyDone(result) {
-  const [text] = SPOTIFY_RESULTS[result] || SPOTIFY_RESULTS.failed;
-  app().replaceChildren(h("main", { class: "welcome" },
-    h("div", { class: "welcome-lock", "aria-hidden": "true" }, result === "connected" ? "🎧" : "😕"),
-    h("h1", null, result === "connected" ? "Spotify connected" : "Spotify"),
-    h("p", null, text),
-    h("p", { class: "small muted", style: { marginTop: "14px" } }, "If Locked In is on your home screen, close this and go back to it."),
-    h("a", { class: "btn btn-big btn-block", style: { marginTop: "22px" }, href: location.pathname }, "Open Locked In")));
-}
-
-/** Calls the spotify function; a refusal comes back as its own message, not "non-2xx status code". */
-async function spotifyCall(action) {
-  const { data, error } = await db.functions.invoke("spotify", { body: { action } });
+/** Calls the music function; a refusal comes back as its own message, not "non-2xx status code". */
+async function musicCall(action, extra = {}) {
+  const { data, error } = await db.functions.invoke("music", { body: { action, ...extra } });
   if (!error) return { data };
   const body = await error.context?.json?.().catch(() => null);
-  return { error: { message: body?.error || "Spotify can't be reached right now. Try again in a minute." } };
+  return { error: { message: body?.error || "Music can't be reached right now. Try again in a minute." } };
 }
 
-async function connectSpotify() {
-  const { data, error } = await spotifyCall("start");
-  if (error || !data?.url) return oops(error || { message: "Spotify can't be connected right now." });
-  location.href = data.url;
+function linkMusicSheet() {
+  const music = state.music || {};
+  const input = h("input", { id: "lastfm-name", class: "input", maxlength: 60, placeholder: "Your Last.fm username", value: music.lastfm || "", autocomplete: "off", autocapitalize: "none", spellcheck: "false" });
+  const outside = (href, text) => h("a", { class: "btn btn-small btn-soft", href, target: "_blank", rel: "noopener" }, text);
+  sheet((box, close) => box.append(
+    h("h2", null, "Show what you're playing 🎧"),
+    h("p", { class: "muted", style: { marginTop: "6px" } }, "Locked In hears it through Last.fm, a free site Spotify reports to. It takes two minutes, once, and your crew only sees it while you're locked in."),
+    h("div", { class: "setting", style: { marginTop: "8px" } },
+      h("div", null, h("strong", null, "1. Get a free Last.fm account"), h("small", null, "Skip this if you have one")),
+      outside("https://www.last.fm/join", "Sign up ↗")),
+    h("div", { class: "setting" },
+      h("div", null, h("strong", null, "2. Connect Spotify to it"), h("small", null, "Applications → Spotify Scrobbling → Connect")),
+      outside("https://www.last.fm/settings/applications", "Open ↗")),
+    h("form", { onsubmit: async (ev) => {
+      ev.preventDefault();
+      const go = ev.currentTarget.querySelector("button[type=submit]");
+      go.disabled = true;
+      const { data, error } = await musicCall("link", { name: input.value });
+      go.disabled = false;
+      if (error) return oops(error);
+      state.music = { connected: true, lastfm: data.name, problem: null };
+      close(); render();
+      // No scrobbles at all usually means step 2 hasn't happened yet.
+      if (data.scrobbles) toast(`Linked ${data.name} 🎧 Your crew sees what you play while you're locked in.`, { ms: 6000 });
+      else toast(`Linked ${data.name}, but nothing has reached Last.fm yet. Connect Spotify to it (step 2), then play a song.`, { bad: true, ms: 8000 });
+    } },
+      h("label", { class: "field" }, h("span", { class: "label" }, "3. Your Last.fm username"), input),
+      h("div", { class: "btn-row" }, h("button", { class: "btn btn-soft", type: "button", onclick: close }, "Cancel"), h("button", { class: "btn", type: "submit" }, "Link"))),
+    music.connected ? h("button", { class: "link", style: { marginTop: "6px" }, onclick: () => { close(); unlinkMusic(); } }, "Stop showing my music") : null));
 }
 
-async function disconnectSpotify() {
+async function unlinkMusic() {
   if (!confirm("Stop showing your crew what you're listening to?")) return;
-  const { error } = await spotifyCall("disconnect");
+  const { error } = await musicCall("unlink");
   if (error) return oops(error);
-  state.music = { connected: false, problem: null };
+  state.music = { connected: false, lastfm: null, problem: null };
   await refresh(); render();
-  toast("Spotify disconnected.");
+  toast("Music unlinked.");
 }
 
-/** A stretch just started: ask Spotify now rather than waiting for the next 30-second check. */
-function askSpotify() {
-  if (SPOTIFY && state.music?.connected) spotifyCall("now");
+/** A stretch just started: ask Last.fm now rather than waiting for the next 30-second check. */
+function askMusic() {
+  if (MUSIC && state.music?.connected) musicCall("now");
 }
 
-/** "🎧 Song · Artist", opening it in Spotify. */
+/** "🎧 Song · Artist", finding it on Spotify. */
 function playingLine(playing) {
   if (!playing?.title) return null;
   const kids = [
@@ -532,20 +529,20 @@ function playingLine(playing) {
   ];
   const label = `Listening to ${playing.title}${playing.by ? ` by ${playing.by}` : ""}`;
   return playing.url
-    ? h("a", { class: "now-playing", href: playing.url, target: "_blank", rel: "noopener", "aria-label": `${label}, open in Spotify` }, ...kids)
+    ? h("a", { class: "now-playing", href: playing.url, target: "_blank", rel: "noopener", "aria-label": `${label}, find it on Spotify` }, ...kids)
     : h("div", { class: "now-playing", "aria-label": label }, ...kids);
 }
 
-function spotifySetting() {
-  if (!SPOTIFY) return null;
+function musicSetting() {
+  if (!MUSIC) return null;
   const music = state.music || {};
-  const note = music.connected ? "Your crew sees what you play while you're locked in"
-    : music.problem || "Show your crew what you're listening to while you're locked in";
+  const note = music.problem
+    || (music.connected ? `Last.fm: ${music.lastfm}. Your crew sees what you play while you're locked in` : "Show your crew what you're listening to while you're locked in");
   return h("div", { class: "setting" },
-    h("div", null, h("strong", null, "🎧 Spotify"), h("small", { class: music.problem ? "setting-problem" : null }, note)),
-    music.connected
-      ? h("button", { class: "btn btn-small btn-soft", onclick: disconnectSpotify }, "Disconnect")
-      : h("button", { class: "btn btn-small", onclick: connectSpotify }, music.problem ? "Reconnect" : "Connect"));
+    h("div", null, h("strong", null, "🎧 Music"), h("small", { class: music.problem ? "setting-problem" : null }, note)),
+    music.connected && !music.problem
+      ? h("button", { class: "btn btn-small btn-soft", onclick: unlinkMusic }, "Unlink")
+      : h("button", { class: "btn btn-small", onclick: linkMusicSheet }, music.problem ? "Fix" : "Set up"));
 }
 
 /* ------------------------------------------------------------
@@ -563,7 +560,7 @@ async function lockIn() {
   render();
   scrollTo({ top: 0, behavior: "smooth" });
   refreshSoon();
-  askSpotify();
+  askMusic();
 }
 
 /** Saves the stretch running now, if it's long enough to count. Returns its length, or null if that failed. */
@@ -664,7 +661,7 @@ async function resume(subject = state.paused?.paused_subject) {
   state.live = { ...paused, ...row };
   render();
   refreshSoon();
-  askSpotify();
+  askMusic();
 }
 
 /** Done from a break: nothing left to save, so just close the sitting. */
@@ -1096,7 +1093,7 @@ function settingsCard() {
     h("div", { class: "card" },
       h("div", { class: "setting" }, h("div", null, h("strong", null, `${state.me.emoji} ${state.me.name}`), h("small", null, "Your name and emoji")), h("button", { class: "btn btn-small btn-soft", onclick: editProfile }, "Edit")),
       h("label", { class: "setting" }, h("div", null, h("strong", null, "Share where I study"), h("small", null, "So friends can come and join you")), share),
-      spotifySetting(),
+      musicSetting(),
       canNotify ? h("div", { class: "setting" }, h("div", null, h("strong", null, "Notifications"), h("small", null, Notification.permission === "granted" ? "On while Locked In is open" : "When a friend locks in or pings you")),
         Notification.permission === "granted" ? h("span", { class: "pill" }, "✓ On") : h("button", { class: "btn btn-small btn-soft", onclick: async () => { await Notification.requestPermission(); render(); } }, "Turn on")) : null,
       h("div", { class: "setting" }, h("div", null, h("strong", null, "Your other devices"), h("small", null, "Use this account on your laptop or another phone")), h("button", { class: "btn btn-small btn-soft", onclick: showPairingCode }, "Add a device"))),

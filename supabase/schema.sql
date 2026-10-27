@@ -77,7 +77,7 @@ create table public.live (
   paused_at timestamptz,
   paused_subject text check (char_length(btrim(paused_subject)) between 1 and 40),
   banked_seconds integer not null default 0 check (banked_seconds >= 0),
-  -- What they're playing on Spotify, written only by the spotify edge function (see Music below).
+  -- What they're playing (through Last.fm), written only by the music edge function (see Music below).
   now_playing jsonb,
   updated_at timestamptz not null default now(),
   constraint live_shape check ((started_at is null) = (subject is null) and (started_at is null) = (session_id is null)),
@@ -761,65 +761,55 @@ revoke execute on function public.my_subject_stats(text) from public, anon;
 grant execute on function public.my_subject_stats(text) to authenticated;
 
 /* ------------------------------------------------------------
-   Music: what you're playing on Spotify, shown to your crew while
-   you're locked in. The spotify edge function does the sign-in,
-   keeps the tokens here and writes live.now_playing every 30 s.
+   Music: what you're playing, shown to your crew while you're locked
+   in. It comes through Last.fm, which Spotify reports to, so anyone
+   can link their own account. The music edge function checks the
+   name you link and writes live.now_playing every 30 s.
+   (Replaced the Spotify sign-in on 2026-10-27; its tables were
+   dropped by hand in the SQL editor, so that isn't in migrations.)
    ------------------------------------------------------------ */
 
 create extension if not exists pg_cron;
 create extension if not exists pg_net with schema extensions;
 
--- Tokens per person. Only the edge function, through the service-role functions below, reads them.
-create table private.spotify_links (
+-- Whose Last.fm to ask. Only the edge function, through the service-role functions below, reads it.
+create table private.music_links (
   user_id uuid primary key references public.profiles (id) on delete cascade,
-  refresh_token text,
-  access_token text,
-  expires_at timestamptz,
-  connected_at timestamptz not null default now(),
+  lastfm text,
+  linked_at timestamptz not null default now(),
   polled_at timestamptz not null default 'epoch',
   problem text
 );
--- A sign-in in progress: Spotify sends people back with `state`, which finds the verifier.
-create table private.spotify_pending (
-  state text primary key,
-  user_id uuid not null references public.profiles (id) on delete cascade,
-  verifier text not null,
-  created_at timestamptz not null default now(),
-  used_at timestamptz
-);
+-- One Locked In account per Last.fm account.
+create unique index music_links_lastfm on private.music_links (lower(lastfm));
 -- When everyone was last checked, so the sweep runs at most every 20 seconds whoever calls it.
 create table private.music_sweep (
   id integer primary key default 1 check (id = 1),
   last_at timestamptz not null default 'epoch'
 );
 insert into private.music_sweep default values;
-alter table private.spotify_links enable row level security;
-alter table private.spotify_pending enable row level security;
+alter table private.music_links enable row level security;
 alter table private.music_sweep enable row level security;
-revoke all on private.spotify_links, private.spotify_pending, private.music_sweep from public, anon, authenticated;
+revoke all on private.music_links, private.music_sweep from public, anon, authenticated;
 
-create function public.music_begin(p_user uuid, p_state text, p_verifier text)
-returns void
-language sql security definer set search_path = ''
+-- Link (or relink) someone's Last.fm. False when another account already has it.
+create function public.music_link(p_user uuid, p_lastfm text)
+returns boolean
+language plpgsql security definer set search_path = ''
 as $$
-  insert into private.spotify_pending (state, user_id, verifier) values (p_state, p_user, p_verifier);
-$$;
+begin
+  insert into private.music_links as m (user_id, lastfm, polled_at) values (p_user, p_lastfm, now())
+  on conflict (user_id) do update set lastfm = excluded.lastfm, linked_at = now(), polled_at = now(), problem = null;
+  return true;
+exception when unique_violation then
+  return false;
+end $$;
 
--- Each state works once, within 15 minutes.
-create function public.music_redeem(p_state text)
-returns table (user_id uuid, verifier text)
-language sql security definer set search_path = ''
-as $$
-  update private.spotify_pending p set used_at = now()
-  where p.state = p_state and p.used_at is null and p.created_at > now() - interval '15 minutes'
-  returning p.user_id, p.verifier;
-$$;
-
--- Who to ask Spotify about: everyone locked in with a working link (a sweep,
+-- Who to ask Last.fm about: everyone locked in with a working link (a sweep,
 -- at most every 20 seconds), or one person right now. Claiming sets polled_at,
 -- so overlapping calls never ask twice.
-create function public.music_due(p_user uuid default null)
-returns table (user_id uuid, refresh_token text, access_token text, expires_at timestamptz)
+create function public.music_claim(p_user uuid default null)
+returns table (user_id uuid, lastfm text)
 language plpgsql security definer set search_path = ''
 as $$
 begin
@@ -829,77 +819,62 @@ begin
   end if;
   return query
     with claimed as (
-      update private.spotify_links s set polled_at = now()
+      update private.music_links m set polled_at = now()
       from public.live l
-      where l.user_id = s.user_id and l.started_at is not null and s.refresh_token is not null
-        and (p_user is null or s.user_id = p_user)
-        and s.polled_at < now() - interval '8 seconds'
-      returning s.user_id, s.refresh_token, s.access_token, s.expires_at
+      where l.user_id = m.user_id and l.started_at is not null and m.lastfm is not null and m.problem is null
+        and (p_user is null or m.user_id = p_user)
+        and m.polled_at < now() - interval '8 seconds'
+      returning m.user_id, m.lastfm
     )
-    select c.user_id, c.refresh_token, c.access_token, c.expires_at from claimed c;
+    select c.user_id, c.lastfm from claimed c;
 end $$;
 
--- After asking Spotify: new tokens (if any), what's playing (null for nothing),
--- or a problem that means the person has to connect again.
-create function public.music_store(p_user uuid, p_tokens jsonb, p_now_playing jsonb, p_problem text default null, p_set_playing boolean default true)
+-- After asking Last.fm: what's playing (null for nothing), or a problem the person has to fix.
+create function public.music_save(p_user uuid, p_now_playing jsonb, p_problem text default null)
 returns void
 language plpgsql security definer set search_path = ''
 as $$
 begin
-  if p_tokens is not null then
-    insert into private.spotify_links as s (user_id, refresh_token, access_token, expires_at, problem)
-    values (p_user, p_tokens->>'refresh_token', p_tokens->>'access_token', (p_tokens->>'expires_at')::timestamptz, null)
-    on conflict (user_id) do update set
-      refresh_token = coalesce(excluded.refresh_token, s.refresh_token),
-      access_token = excluded.access_token,
-      expires_at = excluded.expires_at,
-      problem = null,
-      connected_at = case when (p_tokens->>'connected')::boolean then now() else s.connected_at end;
-  end if;
   if p_problem is not null then
-    update private.spotify_links
-    set refresh_token = null, access_token = null, expires_at = null, problem = p_problem
-    where spotify_links.user_id = p_user;
+    update private.music_links set problem = p_problem where music_links.user_id = p_user;
   end if;
-  if p_set_playing then
-    update public.live set now_playing = p_now_playing
-    where live.user_id = p_user and live.started_at is not null and live.now_playing is distinct from p_now_playing;
-  end if;
+  update public.live set now_playing = p_now_playing
+  where live.user_id = p_user and live.started_at is not null and live.now_playing is distinct from p_now_playing;
 end $$;
 
-create function public.music_disconnect(p_user uuid)
+create function public.music_unlink(p_user uuid)
 returns void
 language sql security definer set search_path = ''
 as $$
-  update private.spotify_links set refresh_token = null, access_token = null, expires_at = null, problem = null where user_id = p_user;
+  update private.music_links set lastfm = null, problem = null where user_id = p_user;
   update public.live set now_playing = null where user_id = p_user;
 $$;
 
-revoke execute on function public.music_begin(uuid, text, text), public.music_redeem(text), public.music_due(uuid),
-  public.music_store(uuid, jsonb, jsonb, text, boolean), public.music_disconnect(uuid) from public, anon, authenticated;
-grant execute on function public.music_begin(uuid, text, text), public.music_redeem(text), public.music_due(uuid),
-  public.music_store(uuid, jsonb, jsonb, text, boolean), public.music_disconnect(uuid) to service_role;
+revoke execute on function public.music_link(uuid, text), public.music_claim(uuid),
+  public.music_save(uuid, jsonb, text), public.music_unlink(uuid) from public, anon, authenticated;
+grant execute on function public.music_link(uuid, text), public.music_claim(uuid),
+  public.music_save(uuid, jsonb, text), public.music_unlink(uuid) to service_role;
 
--- For the app: are you connected, and is anything wrong?
+-- For the app: which Last.fm you've linked, and is anything wrong?
 create function public.my_music()
 returns jsonb
 language sql stable security definer set search_path = ''
 as $$
   select coalesce(
-    (select jsonb_build_object('connected', s.refresh_token is not null, 'problem', s.problem)
-     from private.spotify_links s where s.user_id = (select auth.uid())),
-    jsonb_build_object('connected', false, 'problem', null));
+    (select jsonb_build_object('connected', m.lastfm is not null, 'lastfm', m.lastfm, 'problem', m.problem)
+     from private.music_links m where m.user_id = (select auth.uid())),
+    jsonb_build_object('connected', false, 'lastfm', null, 'problem', null));
 $$;
 revoke execute on function public.my_music() from public, anon;
 grant execute on function public.my_music() to authenticated;
 
--- Every 30 seconds, but only calls out while someone connected is locked in.
+-- Every 30 seconds, but only calls out while someone linked is locked in.
 select cron.schedule('locked-in-music', '30 seconds', $job$
   select net.http_post(
-    url := 'https://dmuzyednlvftkoxqhzed.supabase.co/functions/v1/spotify',
+    url := 'https://dmuzyednlvftkoxqhzed.supabase.co/functions/v1/music',
     body := '{"action":"sweep"}'::jsonb,
     headers := '{"content-type":"application/json"}'::jsonb)
   where exists (
-    select 1 from public.live l join private.spotify_links s on s.user_id = l.user_id
-    where l.started_at is not null and s.refresh_token is not null)
+    select 1 from public.live l join private.music_links m on m.user_id = l.user_id
+    where l.started_at is not null and m.lastfm is not null and m.problem is null)
 $job$);

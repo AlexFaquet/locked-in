@@ -4,6 +4,6 @@
 export const SUPABASE_URL = "https://dmuzyednlvftkoxqhzed.supabase.co";
 export const SUPABASE_KEY = "sb_publishable_zWtGh01UZSoYAWMZqZATNQ_z83Lhfjp";
 
-// Spotify ("what's playing" for your crew). Its Client ID lives in
-// supabase/functions/spotify/index.ts; turn this off to hide it in the app.
-export const SPOTIFY = true;
+// Music ("what's playing" for your crew), through Last.fm. Its API key is the
+// music edge function's LASTFM_KEY secret; turn this off to hide it in the app.
+export const MUSIC = true;
