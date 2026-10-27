@@ -405,3 +405,6 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
 .watch-status.is-break { border-color: var(--gold-press); box-shadow: 0 5px 0 var(--gold-press); }
 .watch .hero { margin-top: 16px; }
 .watch-note { margin: 22px 4px 8px; text-align: center; }
+.watch-live { margin-top: 0; }
+.watch-tabs { grid-template-columns: repeat(2, 1fr); }
+div.person-btn { cursor: default; }

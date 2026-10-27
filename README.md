@@ -69,12 +69,14 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
   themselves. It needs a Last.fm API key (last.fm/api/account/create) as the
   function's `LASTFM_KEY` secret.
 - **Let someone watch.** Me → *Let someone watch* makes a link for family,
-  or anyone without an account. It opens a read-only page of just you:
-  studying now or not (with the clock), today, this week, your streak,
-  activity and recent sessions. Never where you study, and nothing about
-  your crew; a timer waiting on *Still locked in?* shows as not studying.
-  The link is shown once (only a hash is kept), the page checks in every
-  minute, and *Turn off* stops it straight away.
+  or anyone without an account. It opens a read-only page with two tabs:
+  *you* (studying now or not, with the clock and where; today, this week,
+  your streak, activity and recent sessions) and *Board* (who's locked in
+  right now, the board and the crew's recent sessions). Places show only for
+  people who share them with the crew, and a timer waiting on *Still locked
+  in?* shows as not studying. Nobody can be tapped or pinged from it. The
+  link is shown once (only a hash is kept), the page checks in every minute,
+  and *Turn off* stops it straight away.
 - **Location is opt-in.** Turn off *Share where I study* and it's hidden
   everywhere, including places already on past sessions.
 
@@ -93,7 +95,7 @@ security:
 | `pings` | sender and recipient | the sender, two minutes apart per kind |
 | `subjects` (your modules) | you | you; unused ones can be removed, the rest archived |
 | `link_keys` | you (never the key itself) | you |
-| `watch_links` | you (never the link's secret) | you; whoever has a link sees only your study, through `watch_stats` |
+| `watch_links` | you (never the link's secret) | you; whoever has a link sees your study and your crew's board, through `watch_stats` |
 
 Pairing a device: `create_pairing_code()` stores a hash of a one-time code,
 and the `pair` edge function ([`supabase/functions/pair`](supabase/functions/pair/index.ts))

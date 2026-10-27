@@ -48,18 +48,19 @@ export function standings(people, key = "week_minutes", now = new Date()) {
     .map((p, i) => ({ ...p, rank: i + 1 }));
 }
 
-/** The one line that makes it a race: who you can catch, or how far ahead you are. */
-export function chaseLine(ranked, meId, key = "week_minutes") {
+/** The one line that makes it a race: who you can catch, or how far ahead you are. `who` names you for someone watching. */
+export function chaseLine(ranked, meId, key = "week_minutes", who = null) {
   const me = ranked.find((p) => p.user_id === meId);
   if (!me || ranked.length < 2) return null;
   if (me.rank === 1) {
     const second = ranked[1];
     const lead = me[key] - second[key];
+    if (who) return lead > 0 ? `${who} is top — ${hm(lead)} clear of ${second.name}.` : `${who} is tied for first with ${second.name}.`;
     return lead > 0 ? `You're top — ${hm(lead)} clear of ${second.name}.` : `Tied for first with ${second.name}. One session settles it.`;
   }
   const ahead = ranked[me.rank - 2];
   const gap = ahead[key] - me[key] + 1;
-  return `${hm(gap)} to overtake ${ahead.name} for #${ahead.rank}.`;
+  return `${hm(gap)} ${who ? `for ${who} ` : ""}to overtake ${ahead.name} for #${ahead.rank}.`;
 }
 
 /** Monday 00:00 of the week `date` falls in, local time — the board's week. */

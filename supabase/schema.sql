@@ -903,11 +903,11 @@ select cron.schedule('locked-in-music', '30 seconds', $job$
 $job$);
 
 /* ------------------------------------------------------------
-   Watch links: a read-only page of one person's study for someone
-   without an account (family, say). It shows whether they're
-   studying now and how long, never where, and nothing about their
-   crew. Only a SHA-256 of the link's secret is stored; the link is
-   shown once, when it's made. The app opens it as #watch=<secret>.
+   Watch links: a read-only page for someone without an account
+   (family, say): one person's study, and their crew's board and
+   who's live. Only a SHA-256 of the link's secret is stored; the
+   link is shown once, when it's made. The app opens it as
+   #watch=<secret>.
    ------------------------------------------------------------ */
 
 create table public.watch_links (
@@ -948,14 +948,18 @@ end $$;
 revoke execute on function public.create_watch_link(text) from public, anon;
 grant execute on function public.create_watch_link(text) to authenticated;
 
--- What a watch link shows. No account needed: the link's secret is the key.
--- A timer waiting on "Still locked in?" shows as not studying, as it does to the crew.
+-- What a watch link shows: its owner, and their crew's board and who's live.
+-- No account needed: the link's secret is the key. Places show only for people
+-- who share them with their crew (the same rule as everywhere), and a timer
+-- waiting on "Still locked in?" shows as not studying.
 create function public.watch_stats(p_token text, p_tz text default 'Europe/London')
 returns jsonb
 language plpgsql security definer set search_path = ''
 as $$
 declare
   v_link record;
+  v_people uuid[];
+  v_shown boolean;
 begin
   select w.id, w.user_id, w.last_seen_at into v_link
   from public.watch_links w where w.token_hash = encode(sha256(convert_to(coalesce(p_token, ''), 'UTF8')), 'hex');
@@ -964,19 +968,38 @@ begin
   if v_link.last_seen_at is null or v_link.last_seen_at < now() - interval '5 minutes' then
     update public.watch_links set last_seen_at = now() where id = v_link.id;
   end if;
-  return (
-    select jsonb_build_object(
-      'person', to_jsonb(st) - 'live_subject' - 'live_started_at' - 'live_location',
-      'live', (select jsonb_build_object('subject', l.subject, 'started_at', l.started_at, 'banked_seconds', l.banked_seconds)
-               from public.live l where l.user_id = v_link.user_id and private.hidden_from(l.started_at, l.checked_at) > now()),
-      'paused_at', (select l.paused_at from public.live l
-                    where l.user_id = v_link.user_id and l.started_at is null and l.paused_at > now() - interval '3 hours'),
-      'sessions', coalesce((select jsonb_agg(jsonb_build_object('subject', s.subject, 'started_at', s.started_at, 'ended_at', s.ended_at) order by s.started_at desc)
-                            from (select s.subject, s.started_at, s.ended_at from public.sessions s
-                                  where s.user_id = v_link.user_id and s.started_at > now() - interval '70 days'
-                                  order by s.started_at desc limit 400) s), '[]'::jsonb)
-    )
-    from private.stats_for(v_link.user_id, p_tz) st where st.user_id = v_link.user_id
+
+  -- The link's owner and everyone in their crews.
+  select array_agg(distinct x.id) into v_people from (
+    select v_link.user_id as id
+    union
+    select theirs.user_id from public.crew_members mine
+    join public.crew_members theirs on theirs.crew_id = mine.crew_id
+    where mine.user_id = v_link.user_id
+  ) x;
+  -- stats_for always shows its own person as live; to a watcher, like the crew, not while waiting on "still here".
+  select coalesce(bool_or(private.hidden_from(l.started_at, l.checked_at) > now()), false) into v_shown
+  from public.live l where l.user_id = v_link.user_id;
+
+  return jsonb_build_object(
+    'me', v_link.user_id,
+    'people', (select coalesce(jsonb_agg(case when st.user_id = v_link.user_id and not v_shown
+                                              then to_jsonb(st) || '{"live_subject": null, "live_started_at": null, "live_location": null}'::jsonb
+                                              else to_jsonb(st) end), '[]'::jsonb)
+               from private.stats_for(v_link.user_id, p_tz) st),
+    -- Running timers anyone can see, and breaks under 3 hours old. Locations are kept only for people who share them.
+    'live', (select coalesce(jsonb_agg(jsonb_build_object('user_id', l.user_id, 'subject', l.subject, 'started_at', l.started_at, 'location', l.location,
+                                                          'paused_at', l.paused_at, 'paused_subject', l.paused_subject, 'banked_seconds', l.banked_seconds, 'now_playing', l.now_playing)), '[]'::jsonb)
+             from public.live l
+             where l.user_id = any(v_people)
+               and ((l.started_at is not null and private.hidden_from(l.started_at, l.checked_at) > now())
+                    or (l.started_at is null and l.paused_at > now() - interval '3 hours'))),
+    'feed', coalesce((select jsonb_agg(jsonb_build_object('user_id', s.user_id, 'subject', s.subject, 'started_at', s.started_at, 'ended_at', s.ended_at, 'location', s.location) order by s.ended_at desc)
+                      from (select * from public.sessions s where s.user_id = any(v_people) order by s.ended_at desc limit 25) s), '[]'::jsonb),
+    'sessions', coalesce((select jsonb_agg(jsonb_build_object('subject', s.subject, 'started_at', s.started_at, 'ended_at', s.ended_at, 'location', s.location) order by s.started_at desc)
+                          from (select s.subject, s.started_at, s.ended_at, s.location from public.sessions s
+                                where s.user_id = v_link.user_id and s.started_at > now() - interval '70 days'
+                                order by s.started_at desc limit 400) s), '[]'::jsonb)
   );
 end $$;
 revoke execute on function public.watch_stats(text, text) from public;

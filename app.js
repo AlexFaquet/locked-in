@@ -24,6 +24,8 @@ const ACTIVITY_KEY = "lockedin.activityView";
 
 const state = {
   user: null, me: null, crews: [], people: [], live: null, paused: null, breaks: [], liveRows: new Map(), music: null, feed: [], mine: [], keys: [], watchers: [], modules: [],
+  // On a watch link's page: what it last loaded. Read-only, and "you" means the person who shared it.
+  watching: null,
   tab: readStored(TAB_KEY) || "now", board: readStored(BOARD_KEY) || "week", subject: "", place: "",
 };
 let channel = null;
@@ -749,6 +751,9 @@ async function stillHere() {
    Painting
    ------------------------------------------------------------ */
 
+/** Paint again whatever is showing: the app, or a watch link's page. */
+const repaint = () => (state.watching ? paintWatch(state.watching) : render());
+
 function render() {
   const me = byId(state.user.id);
   const streak = streakFrom(me?.days || {});
@@ -889,7 +894,7 @@ function liveCard(p) {
         h("strong", null, p.name), " ", sittingClock({ started_at: p.live_started_at, banked_seconds: state.liveRows.get(p.user_id)?.banked_seconds }, "live-clock"),
         h("p", null, p.live_subject, p.live_location ? ` · 📍 ${p.live_location}` : ""))),
     playingLine(state.liveRows.get(p.user_id)?.now_playing),
-    h("div", { class: "live-actions" },
+    state.watching ? null : h("div", { class: "live-actions" },
       p.live_location ? h("button", { class: "btn btn-small btn-live", onclick: () => ping("joining") }, "🏃 I'm coming") : null,
       h("button", { class: "btn btn-small btn-soft", onclick: () => ping("cheer") }, "🔥 Hype")));
 }
@@ -912,7 +917,8 @@ function boardView() {
   const ranked = standings(state.people, key);
   const crewTotal = ranked.reduce((sum, p) => sum + p[key], 0);
   // An empty day is an open race, not a tie between everybody.
-  const chase = crewTotal ? chaseLine(ranked, state.user.id, key) : board.period === "day" ? "Nobody's on the board today yet. Lock in to take first." : null;
+  const who = state.watching && byId(state.user.id)?.name;
+  const chase = crewTotal ? chaseLine(ranked, state.user.id, key, who) : board.period === "day" ? `Nobody's on the board today yet.${who ? "" : " Lock in to take first."}` : null;
   const leader = Math.max(1, ...ranked.map((p) => p[key]));
   const spot = (p, place) => p
     ? personButton(p, `podium-spot ${place}`, h("span", { class: `avatar${p.live_started_at ? " is-live" : ""}` }, p.emoji), h("span", { class: "podium-name" }, p.name), h("span", { class: "podium-time" }, hm(p[key])),
@@ -922,7 +928,7 @@ function boardView() {
     h("section", { class: "card" },
       h("div", { class: "board-head" },
         h("div", { class: "toggle", role: "group", "aria-label": "Period" },
-          ...Object.entries(BOARDS).map(([k, b]) => h("button", { "aria-pressed": String(board === b), onclick: () => { state.board = k; store(BOARD_KEY, k); render(); } }, b.label))),
+          ...Object.entries(BOARDS).map(([k, b]) => h("button", { "aria-pressed": String(board === b), onclick: () => { state.board = k; store(BOARD_KEY, k); repaint(); } }, b.label))),
         h("span", { class: "reset" }, board.period ? `Resets in ${untilReset(new Date(), board.period)}` : `${hm(crewTotal)} together`)),
       h("div", { class: "podium" }, spot(ranked[1], "second"), spot(ranked[0], "first"), spot(ranked[2], "third")),
       chase ? h("div", { class: "chase" }, h("span", { "aria-hidden": "true" }, "🎯"), h("span", null, chase)) : null,
@@ -1142,8 +1148,8 @@ const recentSessions = (sessions, name, count = 6) => h("section", { class: "sec
     h("div", null, h("p", null, s.subject), h("small", null, [`${new Date(s.started_at).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })} ${timeOf(s.started_at)}–${timeOf(s.ended_at)}`, s.location].filter(Boolean).join(" · "))),
     h("strong", { class: "feed-time" }, hm(minutesBetween(s.started_at, s.ended_at))))) : h("p", { class: "empty" }, `${name} hasn't logged anything recently.`)));
 
-/** Anywhere a person appears, tapping them opens their profile. */
-const personButton = (p, className, ...kids) => h("button", { type: "button", class: `person-btn ${className}`, "aria-label": `${p.name}'s profile`, onclick: (ev) => { ev.stopPropagation(); openProfile(p.user_id); } }, ...kids);
+/** Anywhere a person appears, tapping them opens their profile. Not on a watch page, which has no account to load them with. */
+const personButton = (p, className, ...kids) => state.watching ? h("div", { class: `person-btn ${className}` }, ...kids) : h("button", { type: "button", class: `person-btn ${className}`, "aria-label": `${p.name}'s profile`, onclick: (ev) => { ev.stopPropagation(); openProfile(p.user_id); } }, ...kids);
 
 function settingsCard() {
   const share = h("input", { type: "checkbox", class: "switch", checked: state.me.share_location, "aria-label": "Share where you study", onchange: async (ev) => {
@@ -1237,7 +1243,7 @@ function watchersCard() {
   return [
     h("div", { class: "section-head", style: { marginTop: "26px" } }, h("h2", null, "Let someone watch")),
     h("div", { class: "card" },
-      h("p", { class: "small" }, "A link for family, or anyone without an account. It shows whether you're studying now, on what, and how long you've studied. Never where, and nothing about your crew."),
+      h("p", { class: "small" }, "A link for family, or anyone without an account. It shows whether you're studying now, on what and where, how long you've studied, and your crew's board."),
       state.watchers.map((w) => h("div", { class: "setting" },
         h("div", null, h("strong", null, w.label), h("small", null, w.last_seen_at ? `Last looked ${ago(w.last_seen_at)}` : "Not opened yet")),
         h("button", { class: "link", onclick: () => stopWatchLink(w) }, "Turn off"))),
@@ -1249,7 +1255,7 @@ function makeWatchLink() {
   const label = h("input", { class: "input", maxlength: 30, placeholder: "Mum and Dad", autocomplete: "off" });
   sheet((box, close) => box.append(
     h("h2", null, "Let someone watch 👀"),
-    h("p", { class: "muted", style: { marginTop: "6px" } }, "They'll see whether you're studying now and how long you've studied, without needing an account."),
+    h("p", { class: "muted", style: { marginTop: "6px" } }, "They'll see whether you're studying now and how long, and your crew's board, without needing an account. Where people study shows only for those who share it with the crew."),
     h("form", { onsubmit: async (ev) => {
       ev.preventDefault();
       const who = label.value.trim() || "Family";
@@ -1299,32 +1305,66 @@ async function watchPage(token) {
   document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
 }
 
-function paintWatch({ person, live, paused_at: pausedAt, sessions }) {
-  const who = { ...EMPTY_STATS, ...person, live_subject: live?.subject ?? null, live_started_at: live?.started_at ?? null };
+const WATCH_TAB_KEY = "lockedin.watchTab";
+
+/** A watch link's page: the person who shared it, and their crew's board. `data` is what watch_stats returned. */
+function paintWatch(data) {
+  state.watching = data;
+  state.user = { id: data.me };
+  state.people = data.people;
+  state.liveRows = new Map(data.live.map((row) => [row.user_id, row]));
+  state.breaks = data.live.filter((row) => !row.started_at && row.paused_at && byId(row.user_id));
+  state.feed = data.feed;
+  const who = { ...EMPTY_STATS, ...byId(data.me) };
   document.title = `${who.name} · Locked In`;
-  const last = sessions[0];
-  const today = `Today: ${who.today_minutes ? hm(who.today_minutes) : "nothing yet"}`;
-  const status = live
-    ? h("section", { class: "card running" },
-      h("span", { class: "running-tag" }, "STUDYING NOW"),
-      h("h2", null, live.subject),
-      sittingClock(live, "big-clock"),
-      h("p", { class: "running-where" }, today))
-    : h("section", { class: `card watch-status${pausedAt ? " is-break" : ""}` },
-      h("strong", null, pausedAt ? `☕ On a break since ${timeOf(pausedAt)}` : "Not studying right now"),
-      h("p", null, today),
-      !pausedAt && last ? h("small", null, `Last: ${last.subject}, ${new Date(last.ended_at).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })} ${timeOf(last.started_at)}–${timeOf(last.ended_at)}`) : null);
+  const tab = readStored(WATCH_TAB_KEY) === "crew" ? "crew" : "person";
+  const tabButton = (key, icon, label) => h("button", { class: "tab", "aria-current": tab === key ? "page" : null, onclick: () => { store(WATCH_TAB_KEY, key); paintWatch(data); scrollTo({ top: 0 }); } }, h("b", null, icon), label);
   app().replaceChildren(
     h("header", { class: "top" },
       h("div", { class: "brand" }, h("span", { class: "brand-lock", "aria-hidden": "true" }, "🔒"), "Locked In"),
       h("span", { class: "pill" }, "👀 Watching")),
-    h("main", { class: "watch" },
-      status,
-      heroCard(who),
-      activityCard(who, sessions, "Activity"),
-      recentSessions(sessions, who.name, 10),
-      h("p", { class: "small muted watch-note" }, `${who.name} shared this page with you. It keeps itself up to date, and ${who.name} can turn the link off at any time.`)));
+    h("main", { class: "watch" }, tab === "crew" ? watchCrew() : watchPerson(who, data)),
+    h("nav", { class: "tabs watch-tabs", "aria-label": "Sections" }, tabButton("person", who.emoji, who.name), tabButton("crew", "🏆", "Board")));
   tick();
+}
+
+/** The person who shared the link: studying now or not, then their profile. */
+function watchPerson(who, { sessions }) {
+  const row = state.liveRows.get(who.user_id);
+  const last = sessions[0];
+  const today = `Today: ${who.today_minutes ? hm(who.today_minutes) : "nothing yet"}`;
+  const status = who.live_started_at
+    ? h("section", { class: "card running" },
+      h("span", { class: "running-tag" }, "STUDYING NOW"),
+      h("h2", null, who.live_subject),
+      sittingClock({ started_at: who.live_started_at, banked_seconds: row?.banked_seconds }, "big-clock"),
+      who.live_location ? h("p", { class: "running-where" }, "📍 ", who.live_location) : null,
+      playingLine(row?.now_playing),
+      h("p", { class: "running-where" }, today))
+    : h("section", { class: `card watch-status${row?.paused_at ? " is-break" : ""}` },
+      h("strong", null, row?.paused_at ? `☕ On a break since ${timeOf(row.paused_at)}` : "Not studying right now"),
+      h("p", null, today),
+      !row?.paused_at && last ? h("small", null, `Last: ${last.subject}, ${new Date(last.ended_at).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })} ${timeOf(last.started_at)}–${timeOf(last.ended_at)}${last.location ? ` · 📍 ${last.location}` : ""}`) : null);
+  return [
+    status,
+    heroCard(who),
+    activityCard(who, sessions, "Activity"),
+    recentSessions(sessions, who.name, 10),
+    h("p", { class: "small muted watch-note" }, `${who.name} shared this page with you. It keeps itself up to date, and ${who.name} can turn the link off at any time.`),
+  ];
+}
+
+/** Everyone in the crew: who's studying right now, and the board. */
+function watchCrew() {
+  const live = state.people.filter((p) => p.live_started_at).sort((a, b) => +new Date(a.live_started_at) - +new Date(b.live_started_at));
+  return [
+    h("section", { class: "section watch-live" },
+      h("div", { class: "section-head" }, h("h2", null, "Locked in right now"), h("small", null, [live.length ? `${live.length} studying` : "", state.breaks.length ? `${state.breaks.length} on a break` : ""].filter(Boolean).join(" · "))),
+      live.length || state.breaks.length
+        ? [...live.map(liveCard), ...state.breaks.map(breakCard)]
+        : h("div", { class: "card empty" }, h("span", { class: "big" }, "🦗"), "Nobody's locked in right now.")),
+    h("div", { class: "section" }, boardView()),
+  ];
 }
 
 /* ------------------------------------------------------------

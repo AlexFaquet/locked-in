@@ -26,6 +26,9 @@ test("the board ranks the week and tells you who to catch", () => {
   assert.deepEqual(ranked.map((p) => [p.name, p.rank]), [["Bea", 1], ["Cal", 2], ["Alex", 3]], "ties go to the longer streak");
   assert.equal(chaseLine(ranked, "a"), "1m to overtake Cal for #2.");
   assert.equal(chaseLine(ranked, "b"), "You're top — 2h 00m clear of Cal.");
+  // Someone watching sees it by name.
+  assert.equal(chaseLine(ranked, "a", "week_minutes", "Ana"), "1m for Ana to overtake Cal for #2.");
+  assert.equal(chaseLine(ranked, "b", "week_minutes", "Bo"), "Bo is top — 2h 00m clear of Cal.");
   assert.equal(chaseLine([ranked[0]], "b"), null);
 });
 
