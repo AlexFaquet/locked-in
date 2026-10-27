@@ -1300,7 +1300,9 @@ async function watchPage(token) {
       h("div", { class: "welcome-lock", "aria-hidden": "true" }, "😵"), h("h1", null, "Couldn't connect"), h("p", null, "Check your connection and reload.")));
   }
   await load();
-  setInterval(() => { if (!document.hidden) load(); }, 60000);
+  // Nobody types on this page, so it can update itself whenever there's a new version.
+  let minutes = 0;
+  setInterval(() => { if (!document.hidden) { load(); if (++minutes % 5 === 0) updateIfStale(); } }, 60000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
 }
 
@@ -1573,6 +1575,35 @@ function tick() {
 }
 setInterval(() => { if (!document.hidden) tick(); }, 1000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden && state.me && state.crews.length) refreshSoon(); });
+
+/* ------------------------------------------------------------
+   Updates. Browsers keep these files for 10 minutes (GitHub Pages'
+   cache) and a page left open never fetches them again, so a phone
+   can go on running an old version. Compare the copy this page runs
+   with the server's; if they differ, refresh the cached files and
+   reload. Checked on opening and on coming back to the app (nobody's
+   mid-typing then), and every few minutes on a watch page.
+   ------------------------------------------------------------ */
+
+const APP_FILES = ["./", "app.js", "game.mjs", "config.js", "styles.css"];
+const versionOf = (res) => res.headers.get("etag") || res.headers.get("last-modified");
+
+async function updateIfStale() {
+  try {
+    const running = versionOf(await fetch("app.js", { cache: "force-cache" }));
+    const latest = versionOf(await fetch("app.js", { method: "HEAD", cache: "no-store" }));
+    if (!running || !latest || running === latest) return;
+    // Once per version, so a cache that won't let go can't keep reloading the page.
+    if (sessionStorage.getItem("lockedin.updatedTo") === latest) return;
+    sessionStorage.setItem("lockedin.updatedTo", latest);
+    await Promise.all(APP_FILES.map((file) => fetch(file, { cache: "reload" })));
+    location.reload();
+  } catch (_) { /* offline, or storage blocked: the next check tries again */ }
+}
+updateIfStale();
+document.addEventListener("visibilitychange", () => { if (!document.hidden) updateIfStale(); });
+// A different watch link pasted into the same tab only changes the #, which doesn't reload by itself.
+addEventListener("hashchange", () => location.reload());
 
 boot().catch((error) => {
   console.error(error);

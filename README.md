@@ -81,6 +81,11 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
   reset is UK time, whatever time zone the phone is in, and times typed into
   Edit or *Log a session* are read as UK times. So someone watching from
   abroad sees the same times as the crew.
+- **Always the latest version.** Browsers keep the app's files for 10
+  minutes and a page left open never fetches them again, so the app compares
+  the copy it's running with the server's (on opening, on coming back to it,
+  and every few minutes on a watch page) and reloads itself when there's a
+  new one.
 - **Location is opt-in.** Turn off *Share where I study* and it's hidden
   everywhere, including places already on past sessions.
 
