@@ -15,15 +15,47 @@ export function levelProgress(minutes) {
   return { level, title: titleFor(level), into: minutes - from, span: to - from, toNext: to - minutes, ratio: (minutes - from) / (to - from) };
 }
 
-export const localDay = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-const dayBefore = (date) => { const d = new Date(date); d.setDate(d.getDate() - 1); return d; };
+/* Time. Locked In runs on St Andrews time wherever you are, so a day, a week
+   and every clock time mean the same for the whole crew, and for anyone
+   watching from abroad. */
+export const TZ = "Europe/London";
+
+const wallClock = new Intl.DateTimeFormat("en-GB", { timeZone: TZ, year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric", second: "numeric", hourCycle: "h23" });
+
+/** What a St Andrews clock reads at `date`: month 1–12, weekday 0 = Monday. */
+export function ukClock(date) {
+  const p = {};
+  for (const { type, value } of wallClock.formatToParts(date)) p[type] = Number(value);
+  return { y: p.year, m: p.month, d: p.day, h: p.hour, mi: p.minute, s: p.second, weekday: (new Date(Date.UTC(p.year, p.month - 1, p.day)).getUTCDay() + 6) % 7 };
+}
+
+/** The moment a St Andrews clock reads this. Days past the month's end roll over, so `d + 1` is tomorrow. */
+export function ukTime(y, m, d, h = 0, mi = 0) {
+  const wall = Date.UTC(y, m - 1, d, h, mi);
+  const offset = (at) => { const c = ukClock(new Date(at)); return Date.UTC(c.y, c.m - 1, c.d, c.h, c.mi, c.s) - Math.floor(at / 1000) * 1000; };
+  // UK time is UTC or an hour ahead; guessing twice settles it either side of a clock change.
+  return new Date(wall - offset(wall - offset(wall)));
+}
+
+/** A day and time from form fields ("2026-10-27", "14:05") in St Andrews, `plusDays` on. Invalid if either is blank. */
+export function ukAt(day, time, plusDays = 0) {
+  const [y, m, d] = String(day).split("-").map(Number);
+  const [h, mi] = String(time).split(":").map(Number);
+  return [y, m, d, h, mi].every(Number.isFinite) ? ukTime(y, m, d + plusDays, h, mi) : new Date(NaN);
+}
+
+/** "2026-10-27": the St Andrews date at `date`, the key of a `days` map. */
+export const ukDay = (date) => { const c = ukClock(date); return `${c.y}-${String(c.m).padStart(2, "0")}-${String(c.d).padStart(2, "0")}`; };
+
+/** Midnight starting `date`'s day in St Andrews, `days` days on (or back). */
+export const dayStart = (date, days = 0) => { const c = ukClock(date); return ukTime(c.y, c.m, c.d + days); };
 
 /** Days in a row with 30+ minutes. Today only counts once it's earned, and only breaks the streak once it's over. */
 export function streakFrom(days = {}, now = new Date(), minimum = 30) {
-  let day = new Date(now);
-  if ((days[localDay(day)] || 0) < minimum) day = dayBefore(day);
+  let day = dayStart(now);
+  if ((days[ukDay(day)] || 0) < minimum) day = dayStart(day, -1);
   let streak = 0;
-  while ((days[localDay(day)] || 0) >= minimum && streak < 400) { streak++; day = dayBefore(day); }
+  while ((days[ukDay(day)] || 0) >= minimum && streak < 400) { streak++; day = dayStart(day, -1); }
   return streak;
 }
 
@@ -63,12 +95,10 @@ export function chaseLine(ranked, meId, key = "week_minutes", who = null) {
   return `${hm(gap)} ${who ? `for ${who} ` : ""}to overtake ${ahead.name} for #${ahead.rank}.`;
 }
 
-/** Monday 00:00 of the week `date` falls in, local time — the board's week. */
+/** Monday 00:00 of the week `date` falls in, St Andrews time — the board's week. */
 export function weekStart(date) {
-  const d = new Date(date);
-  d.setHours(0, 0, 0, 0);
-  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
-  return d;
+  const c = ukClock(date);
+  return ukTime(c.y, c.m, c.d - c.weekday);
 }
 
 /** The last `count` weeks from daily minutes, oldest first. The last one is this week so far. */
@@ -76,14 +106,9 @@ export function weeksFrom(days = {}, now = new Date(), count = 10) {
   const thisWeek = weekStart(now);
   const weeks = [];
   for (let back = count - 1; back >= 0; back--) {
-    const start = new Date(thisWeek);
-    start.setDate(start.getDate() - 7 * back);
+    const start = dayStart(thisWeek, -7 * back);
     let minutes = 0;
-    for (let i = 0; i < 7; i++) {
-      const day = new Date(start);
-      day.setDate(start.getDate() + i);
-      minutes += days[localDay(day)] || 0;
-    }
+    for (let i = 0; i < 7; i++) minutes += days[ukDay(dayStart(start, i))] || 0;
     weeks.push({ start, minutes, current: back === 0 });
   }
   return weeks;
@@ -152,11 +177,9 @@ export function clock(ms) {
   return `${Math.floor(s / 3600)}:${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 }
 
-/** Time until the board resets: midnight for the day's, Monday 00:00 for the week's (local time). */
+/** Time until the board resets: midnight for the day's, Monday 00:00 for the week's (St Andrews time). */
 export function untilReset(now = new Date(), period = "week") {
-  const next = new Date(now);
-  next.setHours(0, 0, 0, 0);
-  next.setDate(next.getDate() + (period === "day" ? 1 : (8 - next.getDay()) % 7 || 7));
+  const next = period === "day" ? dayStart(now, 1) : dayStart(weekStart(now), 7);
   const minutes = Math.round((+next - +now) / 60000);
   const days = Math.floor(minutes / 1440), hours = Math.floor((minutes % 1440) / 60);
   return days ? `${days}d ${hours}h` : `${hours}h ${minutes % 60}m`;

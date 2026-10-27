@@ -77,6 +77,10 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
   in?* shows as not studying. Nobody can be tapped or pinged from it. The
   link is shown once (only a hash is kept), the page checks in every minute,
   and *Turn off* stops it straight away.
+- **St Andrews time, everywhere.** Every clock time, day, week and board
+  reset is UK time, whatever time zone the phone is in, and times typed into
+  Edit or *Log a session* are read as UK times. So someone watching from
+  abroad sees the same times as the crew.
 - **Location is opt-in.** Turn off *Share where I study* and it's hidden
   everywhere, including places already on past sessions.
 

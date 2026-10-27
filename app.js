@@ -6,10 +6,9 @@
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/+esm";
 import { SUPABASE_URL, SUPABASE_KEY, MUSIC } from "./config.js";
-import { levelProgress, streakFrom, badgesFor, standings, chaseLine, hm, clock, untilReset, ago, localDay, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, hiddenFrom, unconfirmed } from "./game.mjs";
+import { levelProgress, streakFrom, badgesFor, standings, chaseLine, hm, clock, untilReset, ago, TZ, ukDay, ukAt, dayStart, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, hiddenFrom, unconfirmed } from "./game.mjs";
 
 const db = createClient(SUPABASE_URL, SUPABASE_KEY);
-const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/London";
 const EMOJI = ["📚", "🦊", "🐼", "🐸", "🦉", "🐯", "🐙", "🦄", "🐧", "🐨", "🦁", "🐵", "🐳", "🌵", "🍄", "⚡️", "🚀", "🎧", "☕️", "🧠"];
 const MIN_SESSION_MS = 60000;
 const MAX_SESSION_MS = 16 * 3600000;
@@ -57,7 +56,8 @@ function store(key, value) { try { localStorage.setItem(key, value); } catch (_)
 const byId = (id) => state.people.find((p) => p.user_id === id);
 const nameOf = (id) => byId(id)?.name || "Someone";
 const minutesBetween = (a, b) => (+new Date(b) - +new Date(a)) / 60000;
-const timeOf = (iso) => new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+// Every time and date on screen is St Andrews time (TZ), wherever the phone is.
+const timeOf = (iso) => new Date(iso).toLocaleTimeString("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit" });
 const inviteLink = (code) => `${location.origin}${location.pathname}?join=${code}`;
 
 function toast(text, { bad = false, ms = 3800 } = {}) {
@@ -698,15 +698,15 @@ async function endBreak() {
 
 function askWhenStopped() {
   const start = new Date(state.live.started_at);
-  const day = h("input", { class: "input", type: "date", value: localDay(start), max: localDay(new Date()) });
+  const day = h("input", { class: "input", type: "date", value: ukDay(start), max: ukDay(new Date()) });
   const time = h("input", { class: "input", type: "time", value: timeOf(new Date(+start + 2 * 3600000)) });
   sheet((box, close) => box.append(
     h("h2", null, "That's a long one 😅"),
-    h("p", { class: "muted", style: { marginTop: "6px" } }, `You've been locked in since ${start.toLocaleString("en-GB", { weekday: "short", hour: "2-digit", minute: "2-digit" })}. When did you actually stop?`),
+    h("p", { class: "muted", style: { marginTop: "6px" } }, `You've been locked in since ${start.toLocaleString("en-GB", { timeZone: TZ, weekday: "short", hour: "2-digit", minute: "2-digit" })}. When did you actually stop?`),
     h("div", { class: "row", style: { marginTop: "16px" } }, day, time),
     h("div", { class: "btn-row" },
       h("button", { class: "btn btn-soft", onclick: () => { close(); finish({ discard: true }); } }, "Throw it away"),
-      h("button", { class: "btn", onclick: () => { close(); finish({ end: new Date(`${day.value}T${time.value}:00`) }); } }, "Save"))), { key: "when-stopped" });
+      h("button", { class: "btn", onclick: () => { close(); finish({ end: ukAt(day.value, time.value) }); } }, "Save"))), { key: "when-stopped" });
 }
 
 /* ------------------------------------------------------------
@@ -725,7 +725,7 @@ function askIfStillThere() {
   stillThereAsked = asking;
   if (Date.now() - +new Date(live.started_at) > MAX_SESSION_MS) return askWhenStopped();
   const since = Math.max(+new Date(live.started_at), live.checked_at ? +new Date(live.checked_at) : 0);
-  const sinceText = `${new Date(since).toLocaleString("en-GB", { weekday: localDay(new Date(since)) === localDay(new Date()) ? undefined : "long", hour: "2-digit", minute: "2-digit" })}`;
+  const sinceText = `${new Date(since).toLocaleString("en-GB", { timeZone: TZ, weekday: ukDay(new Date(since)) === ukDay(new Date()) ? undefined : "long", hour: "2-digit", minute: "2-digit" })}`;
   sheet((box, close) => box.append(
     h("h2", null, "Still locked in? 👀"),
     h("p", { class: "muted", style: { marginTop: "6px" } }, `Your ${live.subject} timer hasn't been touched since ${sinceText}. It's still running, but at ${timeOf(hiddenFrom(live))} your crew stopped seeing you and the board stopped counting. Say you're still here and it all counts again.`),
@@ -963,7 +963,7 @@ function meView() {
     h("section", { class: "section" },
       h("div", { class: "section-head" }, h("h2", null, "Your sessions"), h("button", { class: "btn btn-small btn-soft", onclick: () => sessionSheet() }, "+ Log one")),
       h("div", { class: "card" }, state.mine.length ? state.mine.slice(0, 20).map((s) => h("div", { class: "session-row" },
-        h("div", null, h("p", null, s.subject), h("small", null, [`${new Date(s.started_at).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })} ${timeOf(s.started_at)}–${timeOf(s.ended_at)}`, s.location].filter(Boolean).join(" · "))),
+        h("div", null, h("p", null, s.subject), h("small", null, [`${new Date(s.started_at).toLocaleDateString("en-GB", { timeZone: TZ, weekday: "short", day: "numeric", month: "short" })} ${timeOf(s.started_at)}–${timeOf(s.ended_at)}`, s.location].filter(Boolean).join(" · "))),
         h("strong", { class: "feed-time" }, hm(minutesBetween(s.started_at, s.ended_at))),
         h("button", { class: "x", "aria-label": `Edit ${s.subject} session`, title: "Edit", onclick: () => sessionSheet(s) }, "✎"),
         h("button", { class: "x", "aria-label": `Delete ${s.subject} session`, title: "Delete", onclick: () => removeSession(s) }, "✕"))) : h("p", { class: "empty" }, "Your sessions show up here."))),
@@ -1035,8 +1035,8 @@ function activityCard(person, sessions, title) {
     h("div", { class: "card" }, body));
 }
 
-const dayLabel = (date) => date.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "short" });
-const shortDate = (date) => date.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+const dayLabel = (date) => date.toLocaleDateString("en-GB", { timeZone: TZ, weekday: "long", day: "numeric", month: "short" });
+const shortDate = (date) => date.toLocaleDateString("en-GB", { timeZone: TZ, day: "numeric", month: "short" });
 const subjectLines = (list) => list.slice(0, 3).map((s) => `${s.subject} · ${hm(s.minutes)}`).concat(list.length > 3 ? [`+ ${list.length - 3} more`] : []);
 
 /** Hours per week for the last ten weeks. This week, so far, is the bright bar. */
@@ -1049,7 +1049,7 @@ function weeklyChart(days = {}, sessions = []) {
   const grid = [];
   for (let v = step; v <= top; v += step) grid.push(h("span", { class: "wk-grid", style: { bottom: pct(v) } }, h("em", null, `${v / 60}h`)));
   const cols = weeks.map((w, i) => {
-    const end = new Date(w.start); end.setDate(end.getDate() + 7);
+    const end = dayStart(w.start, 7);
     const before = weeks[i - 1]?.minutes;
     const labelled = w.minutes && (w.current || w.minutes === best);
     const col = h("button", { type: "button", class: `wk-col${w.current ? " is-current" : ""}`, "aria-label": `Week of ${shortDate(w.start)}: ${hm(w.minutes)}` },
@@ -1072,17 +1072,16 @@ function weeklyChart(days = {}, sessions = []) {
 /** Every day of the last ten weeks; darker is more. Tap or hover for the day. */
 function heatmap(days = {}, sessions = []) {
   const today = new Date();
-  const start = weekStart(today);
-  start.setDate(start.getDate() - 63);
+  const start = dayStart(weekStart(today), -63);
   const cells = [];
   for (let i = 0; i < 70; i++) {
-    const day = new Date(start); day.setDate(start.getDate() + i);
-    const minutes = days[localDay(day)] || 0;
+    const day = dayStart(start, i);
+    const minutes = days[ukDay(day)] || 0;
     if (day > today) { cells.push(h("span", { class: "heat-future", "aria-hidden": "true" })); continue; }
     const level = minutes >= 240 ? 4 : minutes >= 120 ? 3 : minutes >= 30 ? 2 : minutes > 0 ? 1 : 0;
-    const cell = h("button", { type: "button", class: localDay(day) === localDay(today) ? "is-today" : null, dataset: { level }, "aria-label": `${dayLabel(day)}: ${minutes ? hm(minutes) : "no study"}` });
-    const next = new Date(day); next.setDate(day.getDate() + 1);
-    explain(cell, () => [dayLabel(day) + (localDay(day) === localDay(today) ? " (today)" : ""), minutes ? hm(minutes) : "No study", ...subjectLines(subjectsBetween(sessions, day, next))]);
+    const cell = h("button", { type: "button", class: ukDay(day) === ukDay(today) ? "is-today" : null, dataset: { level }, "aria-label": `${dayLabel(day)}: ${minutes ? hm(minutes) : "no study"}` });
+    const next = dayStart(day, 1);
+    explain(cell, () => [dayLabel(day) + (ukDay(day) === ukDay(today) ? " (today)" : ""), minutes ? hm(minutes) : "No study", ...subjectLines(subjectsBetween(sessions, day, next))]);
     cells.push(cell);
   }
   return [h("div", { class: "heat", role: "group", "aria-label": "Study per day over the last ten weeks" }, cells),
@@ -1145,7 +1144,7 @@ function openProfile(userId) {
 const recentSessions = (sessions, name, count = 6) => h("section", { class: "section" },
   h("div", { class: "section-head" }, h("h2", null, "Recent sessions")),
   h("div", { class: "card" }, sessions.length ? sessions.slice(0, count).map((s) => h("div", { class: "session-row" },
-    h("div", null, h("p", null, s.subject), h("small", null, [`${new Date(s.started_at).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })} ${timeOf(s.started_at)}–${timeOf(s.ended_at)}`, s.location].filter(Boolean).join(" · "))),
+    h("div", null, h("p", null, s.subject), h("small", null, [`${new Date(s.started_at).toLocaleDateString("en-GB", { timeZone: TZ, weekday: "short", day: "numeric", month: "short" })} ${timeOf(s.started_at)}–${timeOf(s.ended_at)}`, s.location].filter(Boolean).join(" · "))),
     h("strong", { class: "feed-time" }, hm(minutesBetween(s.started_at, s.ended_at))))) : h("p", { class: "empty" }, `${name} hasn't logged anything recently.`)));
 
 /** Anywhere a person appears, tapping them opens their profile. Not on a watch page, which has no account to load them with. */
@@ -1344,7 +1343,7 @@ function watchPerson(who, { sessions }) {
     : h("section", { class: `card watch-status${row?.paused_at ? " is-break" : ""}` },
       h("strong", null, row?.paused_at ? `☕ On a break since ${timeOf(row.paused_at)}` : "Not studying right now"),
       h("p", null, today),
-      !row?.paused_at && last ? h("small", null, `Last: ${last.subject}, ${new Date(last.ended_at).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })} ${timeOf(last.started_at)}–${timeOf(last.ended_at)}${last.location ? ` · 📍 ${last.location}` : ""}`) : null);
+      !row?.paused_at && last ? h("small", null, `Last: ${last.subject}, ${new Date(last.ended_at).toLocaleDateString("en-GB", { timeZone: TZ, weekday: "short", day: "numeric", month: "short" })} ${timeOf(last.started_at)}–${timeOf(last.ended_at)}${last.location ? ` · 📍 ${last.location}` : ""}`) : null);
   return [
     status,
     heroCard(who),
@@ -1428,12 +1427,10 @@ function timingProblem(start, end) {
   return null;
 }
 
-/** The latest moment, up to now, that it was this o'clock ("HH:MM"). */
+/** The latest moment, up to now, that a St Andrews clock read this ("HH:MM"). */
 function lastTimeAt(value, now = new Date()) {
-  const [hours, minutes] = value.split(":").map(Number);
-  const at = new Date(now); at.setHours(hours, minutes, 0, 0);
-  if (at > now) at.setDate(at.getDate() - 1);
-  return at;
+  const at = ukAt(ukDay(now), value);
+  return at > now ? ukAt(ukDay(now), value, -1) : at;
 }
 
 /** Fix the timer that's running: the module, when you really started, where you are, or when you stopped and forgot to say. */
@@ -1499,7 +1496,7 @@ function sessionSheet(session = null) {
   const names = [...new Set([...(session ? [session.subject] : []), ...modules.map((m) => m.name)])];
   const chosen = session ? session.subject : state.subject;
   const subject = h("select", { class: "input" }, names.map((name) => h("option", { value: name, selected: name === chosen }, name)));
-  const day = h("input", { class: "input", type: "date", value: localDay(was.start), max: localDay(now), "aria-label": "Day" });
+  const day = h("input", { class: "input", type: "date", value: ukDay(was.start), max: ukDay(now), "aria-label": "Day" });
   const from = h("input", { class: "input", type: "time", value: timeOf(was.start), "aria-label": "Started" });
   const to = h("input", { class: "input", type: "time", value: timeOf(was.end), "aria-label": "Finished" });
   sheet((box, close) => box.append(
@@ -1509,11 +1506,11 @@ function sessionSheet(session = null) {
     h("div", { class: "form-grid", style: { marginTop: "14px" } }, day, from, to),
     h("div", { class: "btn-row" }, h("button", { class: "btn btn-soft", onclick: close }, "Cancel"),
       h("button", { class: "btn", onclick: async () => {
-        const start = new Date(`${day.value}T${from.value}:00`);
-        const end = new Date(`${day.value}T${to.value}:00`);
+        const start = ukAt(day.value, from.value);
+        let end = ukAt(day.value, to.value);
         if (!Number.isFinite(+start) || !Number.isFinite(+end)) return toast("Pick a day and both times.", { bad: true });
         // Finishing "before" you started means you went past midnight.
-        if (end <= start) end.setDate(end.getDate() + 1);
+        if (end <= start) end = ukAt(day.value, to.value, 1);
         const problem = timingProblem(start, end);
         if (problem) return toast(problem, { bad: true });
         const row = { subject: subject.value, started_at: start.toISOString(), ended_at: end.toISOString() };
