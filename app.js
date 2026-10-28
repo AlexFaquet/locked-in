@@ -20,11 +20,16 @@ const BOARD_KEY = "lockedin.board";
 const LINKING_KEY = "lockedin.linking";
 const SKIPPED_MODULES_KEY = "lockedin.skippedModules";
 const ACTIVITY_KEY = "lockedin.activityView";
+const CHAT_CREW_KEY = "lockedin.chatCrew";
+// When you last saw each crew's chat, on this device: { crewId: ISO time }.
+const CHAT_READ_KEY = "lockedin.chatRead";
 
 const state = {
   user: null, me: null, crews: [], people: [], live: null, paused: null, breaks: [], liveRows: new Map(), music: null, feed: [], mine: [], keys: [], watchers: [], modules: [],
   // On a watch link's page: what it last loaded. Read-only, and "you" means the person who shared it.
   watching: null,
+  // Crew chat: the latest messages across your crews (for unread counts), and the open crew's conversation.
+  recent: [], chat: { crew: null, messages: [], loaded: false },
   tab: readStored(TAB_KEY) || "now", board: readStored(BOARD_KEY) || "week", subject: "", place: "",
 };
 let channel = null;
@@ -344,7 +349,7 @@ async function loadCrews() {
 
 async function refresh() {
   const uid = state.user.id;
-  const [stats, live, feed, mine, keys, modules, watchers] = await Promise.all([
+  const [stats, live, feed, mine, keys, modules, watchers, recent] = await Promise.all([
     db.rpc("room_stats", { p_tz: TZ }),
     // Yours and your crewmates', as the database allows: who's studying, who's on a break.
     db.from("live").select("user_id, session_id, subject, started_at, location, paused_at, paused_subject, banked_seconds, now_playing, checked_at"),
@@ -353,10 +358,11 @@ async function refresh() {
     db.from("link_keys").select("id, label, created_at, last_used_at").order("created_at"),
     db.rpc("my_subject_stats", { p_tz: TZ }),
     db.from("watch_links").select("id, label, created_at, last_seen_at").order("created_at"),
+    db.from("messages").select("id, crew_id, user_id, created_at").order("created_at", { ascending: false }).limit(60),
     loadCrews(),
   ]);
   if (MUSIC) db.rpc("my_music").then(({ data }) => { if (data) { const changed = JSON.stringify(data) !== JSON.stringify(state.music); state.music = data; if (changed && state.tab === "me") keepFocus(render); } });
-  const failed = [stats, live, feed, mine, keys, modules, watchers].find((r) => r.error);
+  const failed = [stats, live, feed, mine, keys, modules, watchers, recent].find((r) => r.error);
   if (failed) return oops(failed.error, "Couldn't load your crew.");
   state.people = stats.data || [];
   state.liveRows = new Map((live.data || []).map((row) => [row.user_id, row]));
@@ -368,6 +374,7 @@ async function refresh() {
   state.mine = mine.data || [];
   state.keys = keys.data || [];
   state.watchers = watchers.data || [];
+  state.recent = recent.data || [];
   state.modules = modules.data || [];
   scheduleStillThere();
 }
@@ -473,6 +480,9 @@ function subscribe() {
     // New crewmates and renamed ones. Inserts and updates only: those are RLS-checked, deletes aren't.
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "crew_members" }, refreshSoon)
     .on("postgres_changes", { event: "UPDATE", schema: "public", table: "profiles" }, refreshSoon)
+    // RLS lets through only your crews' messages. A delete arrives as just an id, for whoever's listening.
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, ({ new: message }) => gotMessage(message))
+    .on("postgres_changes", { event: "DELETE", schema: "public", table: "messages" }, ({ old }) => lostMessage(old?.id))
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "pings", filter: `to_user=eq.${state.user.id}` }, ({ new: ping }) => {
       const who = byId(ping.from_user);
       notify(ping.kind === "joining" ? `🏃 ${who?.name || "Someone"} is on the way to join you!` : `🔥 ${who?.name || "Someone"} is cheering you on!`);
@@ -759,9 +769,13 @@ function render() {
   const streak = streakFrom(me?.days || {});
   const level = levelProgress(me?.total_minutes || 0);
   const liveOthers = state.people.filter((p) => p.live_started_at && p.user_id !== state.user.id).length;
-  const tab = (key, icon, label) => h("button", { class: "tab", "aria-current": state.tab === key ? "page" : null, onclick: () => { state.tab = key; store(TAB_KEY, key); render(); scrollTo({ top: 0 }); } },
-    h("b", { class: key === "now" && liveOthers ? "tab-dot" : null, dataset: key === "now" && liveOthers ? { count: liveOthers } : {} }, icon), label);
-  const views = { now: nowView, board: boardView, me: meView };
+  const unread = unreadTotal();
+  const dots = { now: liveOthers, chat: unread > 9 ? "9+" : unread };
+  const tab = (key, icon, label) => h("button", { class: "tab", "aria-current": state.tab === key ? "page" : null, onclick: () => { state.tab = key; store(TAB_KEY, key); if (key === "chat") openChat(); else { render(); scrollTo({ top: 0 }); } } },
+    h("b", { class: dots[key] ? "tab-dot" : null, dataset: dots[key] ? { count: dots[key] } : {} }, icon), label);
+  const views = { now: nowView, board: boardView, chat: chatView, me: meView };
+  // In the chat, someone reading the latest messages stays with them as new ones arrive.
+  const followChat = state.tab === "chat" && (state.chat.jump || innerHeight + scrollY >= document.documentElement.scrollHeight - 120);
   app().replaceChildren(
     h("header", { class: "top" },
       h("div", { class: "brand" }, h("span", { class: "brand-lock", "aria-hidden": "true" }, "🔒"), "Locked In"),
@@ -769,8 +783,16 @@ function render() {
         h("span", { class: "pill pill-flame", title: "Days in a row with 30+ minutes" }, "🔥 ", String(streak)),
         h("span", { class: "pill pill-level", title: level.title }, "Lv ", String(level.level)))),
     h("main", null, (views[state.tab] || nowView)()),
-    h("nav", { class: "tabs", "aria-label": "Sections" }, tab("now", "⏱️", "Now"), tab("board", "🏆", "Board"), tab("me", state.me.emoji, "Me")));
+    h("nav", { class: "tabs", "aria-label": "Sections" }, tab("now", "⏱️", "Now"), tab("board", "🏆", "Board"), tab("chat", "💬", "Chat"), tab("me", state.me.emoji, "Me")));
   tick();
+  const chatting = state.tab === "chat" && Boolean(chatCrew());
+  composer.hidden = !chatting;
+  document.documentElement.classList.toggle("chatting", chatting);
+  if (chatting) {
+    if (followChat) scrollTo({ top: document.documentElement.scrollHeight, behavior: state.chat.jump ? "instant" : "smooth" });
+    state.chat.jump = false;
+    markChatRead();
+  }
   askIfStillThere();
 }
 
@@ -908,6 +930,152 @@ function breakCard(row) {
         h("strong", null, p.name), " ", h("span", { class: "break-clock" }, "☕ ", h("span", { dataset: { since: row.paused_at } }, clock(Date.now() - +new Date(row.paused_at)))),
         h("p", null, `On a break from ${row.paused_subject} · ${hm(row.banked_seconds / 60)} so far`))));
 }
+
+/* ------------------------------------------------------------
+   Crew chat — one conversation per crew, only its members see it
+   (the database decides). The box you type in sits outside #app, so
+   live updates repainting the page never take what you're typing
+   or close the keyboard.
+   ------------------------------------------------------------ */
+
+/** The crew whose chat is open: the one you last picked, or your first. */
+const chatCrew = () => state.crews.find((c) => c.id === readStored(CHAT_CREW_KEY)) || state.crews[0] || null;
+
+function chatReadMarks() { try { return JSON.parse(readStored(CHAT_READ_KEY) || "{}"); } catch (_) { return {}; } }
+
+/** Messages from other people since you last looked, per crew. */
+function unreadIn(crewId, marks = chatReadMarks()) {
+  const seen = +new Date(marks[crewId] || 0);
+  return state.recent.filter((m) => m.crew_id === crewId && m.user_id !== state.user.id && +new Date(m.created_at) > seen).length;
+}
+const unreadTotal = () => { const marks = chatReadMarks(); return state.crews.reduce((sum, c) => sum + unreadIn(c.id, marks), 0); };
+
+/** Reading the open chat on screen marks it read, up to its newest message. */
+function markChatRead() {
+  const crew = chatCrew();
+  const newest = Math.max(0, ...[...state.chat.messages, ...state.recent].filter((m) => m.crew_id === crew?.id).map((m) => +new Date(m.created_at)));
+  if (!crew || !newest || document.hidden) return;
+  const marks = chatReadMarks();
+  if (+new Date(marks[crew.id] || 0) >= newest) return;
+  marks[crew.id] = new Date(newest).toISOString();
+  store(CHAT_READ_KEY, JSON.stringify(marks));
+}
+
+/** Opens the chat tab on a crew's conversation, loading it if it isn't already. */
+async function openChat(crewId = chatCrew()?.id) {
+  if (crewId) store(CHAT_CREW_KEY, crewId);
+  const fresh = state.chat.crew !== crewId;
+  if (fresh) state.chat = { crew: crewId, messages: [], loaded: false };
+  state.chat.jump = true;
+  render();
+  if (!crewId || (!fresh && state.chat.loaded)) return;
+  const { data, error } = await db.from("messages").select("id, crew_id, user_id, body, created_at").eq("crew_id", crewId).order("created_at", { ascending: false }).limit(200);
+  if (state.chat.crew !== crewId) return;
+  if (error) return oops(error, "Couldn't load the chat.");
+  state.chat.messages = (data || []).reverse();
+  state.chat.loaded = true;
+  state.chat.jump = true;
+  if (state.tab === "chat") keepFocus(render);
+}
+
+/** A message arrived (yours, or live from the crew). */
+function gotMessage(m) {
+  if (!m?.id || !state.crews.some((c) => c.id === m.crew_id)) return;
+  if (!state.recent.some((r) => r.id === m.id)) state.recent = [m, ...state.recent].slice(0, 60);
+  const open = state.chat.crew === m.crew_id;
+  if (open && !state.chat.messages.some((r) => r.id === m.id)) state.chat.messages.push(m);
+  if (m.user_id !== state.user.id && document.hidden && "Notification" in window && Notification.permission === "granted") {
+    const who = byId(m.user_id);
+    const crew = state.crews.find((c) => c.id === m.crew_id);
+    try { new Notification(`${who?.emoji || "💬"} ${who?.name || "Someone"} · ${crew?.name || "your crew"}`, { body: m.body, icon: "icon-180.png", tag: `chat:${m.crew_id}` }); } catch (_) {}
+  }
+  keepFocus(render);
+}
+
+function lostMessage(id) {
+  if (!id) return;
+  const had = state.chat.messages.length + state.recent.length;
+  state.chat.messages = state.chat.messages.filter((m) => m.id !== id);
+  state.recent = state.recent.filter((m) => m.id !== id);
+  if (state.chat.messages.length + state.recent.length !== had) keepFocus(render);
+}
+
+async function sendMessage() {
+  const crew = chatCrew();
+  const body = chatInput.value.trim();
+  if (!crew || !body) return;
+  chatInput.value = "";
+  growChatInput();
+  const { data, error } = await db.from("messages").insert({ crew_id: crew.id, body }).select("id, crew_id, user_id, body, created_at").single();
+  if (error) { chatInput.value = body; growChatInput(); return oops(error, "That didn't send. Try again?"); }
+  state.chat.jump = true;
+  gotMessage(data);
+}
+
+async function deleteMessage(m) {
+  if (!confirm("Delete this message for everyone?")) return;
+  const { error } = await db.from("messages").delete().eq("id", m.id);
+  if (error) return oops(error);
+  lostMessage(m.id);
+}
+
+/** Links in a message, and only http(s) ones, become tappable; everything else stays plain text. */
+const linkify = (text) => text.split(/(https?:\/\/[^\s<]*[^\s<.,:;"')\]!?])/g).map((part, i) => i % 2 ? h("a", { href: part, target: "_blank", rel: "noopener noreferrer" }, part) : part);
+
+function dayHeading(iso) {
+  const day = ukDay(new Date(iso));
+  if (day === ukDay(new Date())) return "Today";
+  if (day === ukDay(dayStart(new Date(), -1))) return "Yesterday";
+  return new Date(iso).toLocaleDateString("en-GB", { timeZone: TZ, weekday: "short", day: "numeric", month: "short" });
+}
+
+function chatView() {
+  const crew = chatCrew();
+  if (!crew) return h("div", { class: "card empty" }, h("span", { class: "big" }, "💬"), "Join a crew to chat with it.");
+  if (state.chat.crew !== crew.id) { queueMicrotask(() => openChat(crew.id)); }
+  const marks = chatReadMarks();
+  const picker = state.crews.length > 1
+    ? h("div", { class: "chips chat-crews", role: "group", "aria-label": "Crew" }, state.crews.map((c) => {
+      const n = c.id === crew.id ? 0 : unreadIn(c.id, marks);
+      return h("button", { type: "button", class: "chip", "aria-pressed": String(c.id === crew.id), onclick: () => openChat(c.id) }, c.name, n ? h("b", { class: "chip-count" }, n > 9 ? "9+" : String(n)) : null);
+    }))
+    : null;
+  const lines = [];
+  let lastDay = null, lastSender = null, lastAt = 0;
+  for (const m of state.chat.messages) {
+    const day = ukDay(new Date(m.created_at));
+    if (day !== lastDay) { lines.push(h("p", { class: "chat-day" }, dayHeading(m.created_at))); lastSender = null; }
+    // Messages from the same person within a few minutes sit together under one name.
+    const together = lastSender === m.user_id && +new Date(m.created_at) - lastAt < 5 * 60000;
+    const mine = m.user_id === state.user.id;
+    const who = byId(m.user_id);
+    lines.push(h("div", { class: `msg${mine ? " is-mine" : ""}${together ? " is-cont" : ""}` },
+      mine ? null : h("span", { class: `msg-avatar${together ? " is-blank" : ""}`, "aria-hidden": "true" }, who?.emoji || "👤"),
+      h(mine ? "button" : "div", { class: "msg-bubble", ...(mine ? { type: "button", title: "Delete", onclick: () => deleteMessage(m) } : {}) },
+        mine || together ? null : h("strong", null, who?.name || "Someone who left"),
+        h("p", null, ...linkify(m.body)),
+        h("time", { datetime: m.created_at }, timeOf(m.created_at)))));
+    lastDay = day; lastSender = m.user_id; lastAt = +new Date(m.created_at);
+  }
+  return [
+    h("div", { class: "section-head" }, h("h2", null, crew.name), h("small", null, `${crew.members} ${crew.members === 1 ? "member" : "members"} · only you lot see this`)),
+    picker,
+    h("section", { class: "chat", "aria-label": `${crew.name} chat`, "aria-live": "polite" },
+      lines.length ? lines : h("div", { class: "card empty" }, h("span", { class: "big" }, state.chat.loaded ? "👋" : "⏳"), state.chat.loaded ? "No messages yet. Say hi to the crew." : "Loading the chat…")),
+  ];
+}
+
+/** Where you type. One for the whole app, outside #app, so a repaint never replaces it. */
+const chatInput = h("textarea", { id: "chat-input", class: "composer-input", rows: 1, maxlength: 1000, placeholder: "Message the crew", "aria-label": "Message",
+  enterkeyhint: matchMedia("(hover: hover)").matches ? "send" : "enter",
+  oninput: () => growChatInput(),
+  // A keyboard with a mouse: Enter sends, Shift+Enter is a new line. On a phone, the button sends.
+  onkeydown: (ev) => { if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing && matchMedia("(hover: hover)").matches) { ev.preventDefault(); sendMessage(); } },
+  onfocus: () => setTimeout(() => scrollTo({ top: document.documentElement.scrollHeight }), 300) });
+function growChatInput() { chatInput.style.height = "auto"; chatInput.style.height = `${Math.min(chatInput.scrollHeight, 132)}px`; }
+const composer = h("form", { class: "composer", hidden: true, onsubmit: (ev) => { ev.preventDefault(); sendMessage(); chatInput.focus({ preventScroll: true }); } },
+  chatInput, h("button", { class: "btn composer-send", type: "submit", "aria-label": "Send" }, "➤"));
+document.body.append(composer);
 
 const BOARDS = { today: { label: "Today", key: "today_minutes", period: "day", total: "today" }, week: { label: "This week", key: "week_minutes", period: "week", total: "this week" }, all: { label: "All time", key: "total_minutes" } };
 
@@ -1165,7 +1333,7 @@ function settingsCard() {
       h("div", { class: "setting" }, h("div", null, h("strong", null, `${state.me.emoji} ${state.me.name}`), h("small", null, "Your name and emoji")), h("button", { class: "btn btn-small btn-soft", onclick: editProfile }, "Edit")),
       h("label", { class: "setting" }, h("div", null, h("strong", null, "Share where I study"), h("small", null, "So friends can come and join you")), share),
       musicSetting(),
-      canNotify ? h("div", { class: "setting" }, h("div", null, h("strong", null, "Notifications"), h("small", null, Notification.permission === "granted" ? "On while Locked In is open" : "When a friend locks in or pings you")),
+      canNotify ? h("div", { class: "setting" }, h("div", null, h("strong", null, "Notifications"), h("small", null, Notification.permission === "granted" ? "On while Locked In is open" : "When a friend locks in, pings you or messages the crew")),
         Notification.permission === "granted" ? h("span", { class: "pill" }, "✓ On") : h("button", { class: "btn btn-small btn-soft", onclick: async () => { await Notification.requestPermission(); render(); } }, "Turn on")) : null,
       h("div", { class: "setting" }, h("div", null, h("strong", null, "Your other devices"), h("small", null, "Use this account on your laptop or another phone")), h("button", { class: "btn btn-small btn-soft", onclick: showPairingCode }, "Add a device"))),
     h("div", { class: "section-head", style: { marginTop: "26px" } }, h("h2", null, "Crews"), h("button", { class: "btn btn-small btn-soft", onclick: crewSheet }, "+ Join / start")),

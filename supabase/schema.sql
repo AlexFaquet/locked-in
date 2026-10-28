@@ -1004,3 +1004,35 @@ begin
 end $$;
 revoke execute on function public.watch_stats(text, text) from public;
 grant execute on function public.watch_stats(text, text) to anon, authenticated;
+
+/* ------------------------------------------------------------
+   Crew chat: a group chat per crew. Only the crew's members can
+   read or post in it, and you can delete your own messages.
+   Nothing here reaches watch links, which only read watch_stats.
+   ------------------------------------------------------------ */
+
+create table public.messages (
+  id uuid primary key default gen_random_uuid(),
+  crew_id uuid not null references public.crews (id) on delete cascade,
+  user_id uuid not null default auth.uid() references public.profiles (id) on delete cascade,
+  body text not null check (char_length(btrim(body)) between 1 and 1000),
+  created_at timestamptz not null default now()
+);
+create index messages_crew_id_created_at_idx on public.messages (crew_id, created_at desc);
+create index messages_user_id_idx on public.messages (user_id);
+alter table public.messages enable row level security;
+
+create policy "read your crews' chats" on public.messages for select to authenticated
+  using (crew_id in (select private.my_crews()));
+create policy "post in your crews' chats" on public.messages for insert to authenticated
+  with check (user_id = (select auth.uid()) and crew_id in (select private.my_crews()));
+create policy "delete your own messages" on public.messages for delete to authenticated
+  using (user_id = (select auth.uid()));
+
+revoke all on public.messages from anon, authenticated;
+grant select, delete on public.messages to authenticated;
+-- Who sent it and when are always the database's: you, now.
+grant insert (crew_id, body) on public.messages to authenticated;
+
+-- New messages arrive live (RLS-checked). A delete arrives as just its id.
+alter publication supabase_realtime add table public.messages;

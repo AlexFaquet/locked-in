@@ -291,7 +291,7 @@ p { margin: 0; }
 .crew-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 
 /* ---------- tabs ---------- */
-.tabs { position: fixed; left: 50%; bottom: calc(14px + env(safe-area-inset-bottom)); transform: translateX(-50%); width: min(528px, calc(100% - 32px)); display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; padding: 6px; border-radius: 24px; background: var(--card); border: 2px solid var(--line); box-shadow: 0 6px 0 var(--line), 0 18px 40px rgba(30, 27, 46, .12); z-index: 10; }
+.tabs { position: fixed; left: 50%; bottom: calc(14px + env(safe-area-inset-bottom)); transform: translateX(-50%); width: min(528px, calc(100% - 32px)); display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; padding: 6px; border-radius: 24px; background: var(--card); border: 2px solid var(--line); box-shadow: 0 6px 0 var(--line), 0 18px 40px rgba(30, 27, 46, .12); z-index: 10; }
 .tab { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 4px; border: 0; border-radius: 18px; background: none; color: var(--muted); font: 600 14px var(--display); }
 .tab b { font-size: 22px; font-weight: 400; line-height: 1.1; }
 .tab[aria-current="page"] { background: var(--primary-soft); color: var(--primary); }
@@ -408,3 +408,29 @@ html.sheet-open, html.sheet-open body { overflow: hidden; }
 .watch-live { margin-top: 0; }
 .watch-tabs { grid-template-columns: repeat(2, 1fr); }
 div.person-btn { cursor: default; }
+
+/* Crew chat. Bubbles: theirs on the left under their emoji, yours on the right. */
+.chat-crews { margin: 2px 0 6px; }
+.chip-count { margin-left: 6px; min-width: 20px; padding: 0 6px; border-radius: 999px; background: var(--live); color: #fff; font: 700 12px/20px var(--body); }
+.chat { margin-top: 6px; }
+.chat-day { margin: 18px 0 6px; text-align: center; font-size: 12px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.msg { display: flex; align-items: flex-end; gap: 8px; margin-top: 10px; }
+.msg.is-cont { margin-top: 3px; }
+.msg.is-mine { justify-content: flex-end; }
+.msg-avatar { flex: none; width: 34px; height: 34px; display: grid; place-items: center; border-radius: 50%; background: var(--sunk); font-size: 19px; }
+.msg-avatar.is-blank { visibility: hidden; }
+.msg-bubble { max-width: 78%; padding: 8px 12px 6px; border: 2px solid var(--line); border-radius: 18px 18px 18px 6px; background: var(--card); color: var(--ink); text-align: left; font: inherit; }
+.is-mine .msg-bubble { border-color: var(--primary); border-radius: 18px 18px 6px 18px; background: var(--primary); color: #fff; }
+.msg-bubble strong { display: block; margin-bottom: 1px; font-size: 13px; font-weight: 800; color: var(--primary); }
+.msg-bubble p { white-space: pre-wrap; overflow-wrap: anywhere; font-weight: 600; line-height: 1.35; }
+.msg-bubble a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.msg-bubble time { display: block; margin-top: 2px; text-align: right; font-size: 11px; font-weight: 700; color: var(--muted); }
+.is-mine .msg-bubble time { color: rgba(255, 255, 255, .78); }
+/* The box you type in floats above the tab bar, or above the keyboard when it's up. */
+.composer { position: fixed; z-index: 9; left: 50%; transform: translateX(-50%); width: min(528px, calc(100% - 32px)); bottom: max(calc(102px + env(safe-area-inset-bottom)), calc(var(--keyboard, 0px) + 8px)); display: flex; align-items: flex-end; gap: 8px; padding: 6px; border: 2px solid var(--line); border-radius: 24px; background: var(--card); box-shadow: 0 6px 0 var(--line), 0 18px 40px rgba(30, 27, 46, .12); }
+.composer[hidden] { display: none; }
+.composer-input { flex: 1; min-height: 44px; max-height: 132px; resize: none; border: 0; background: none; padding: 11px 12px; color: var(--ink); font: 600 16px/1.35 var(--body); }
+.composer-input:focus { outline: none; }
+.composer-input::placeholder { color: var(--muted); }
+.composer-send { flex: none; min-width: 48px; min-height: 44px; padding: 0 14px; border-radius: 18px; font-size: 18px; }
+html.chatting .app { padding-bottom: max(calc(186px + env(safe-area-inset-bottom)), calc(var(--keyboard, 0px) + 96px)); }

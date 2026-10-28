@@ -68,6 +68,11 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
   everyone locked in is playing every 30 seconds; nobody can set a track
   themselves. It needs a Last.fm API key (last.fm/api/account/create) as the
   function's `LASTFM_KEY` secret.
+- **Crew chat.** The *Chat* tab is a group chat for each of your crews; only
+  its members can read or post (the database checks), and it never shows on
+  a watch link. Messages arrive live, links are tappable, tapping one of
+  your own deletes it for everyone, and the tab counts what you haven't read
+  (per device). In more than one crew, switch at the top.
 - **Let someone watch.** Me → *Let someone watch* makes a link for family,
   or anyone without an account. It opens a read-only page with two tabs:
   *you* (studying now or not, with the clock and where; today, this week,
@@ -104,6 +109,7 @@ security:
 | `pings` | sender and recipient | the sender, two minutes apart per kind |
 | `subjects` (your modules) | you | you; unused ones can be removed, the rest archived |
 | `link_keys` | you (never the key itself) | you |
+| `messages` | members of that crew | you post in your crews' chats; you delete your own |
 | `watch_links` | you (never the link's secret) | you; whoever has a link sees your study and your crew's board, through `watch_stats` |
 
 Pairing a device: `create_pairing_code()` stores a hash of a one-time code,
