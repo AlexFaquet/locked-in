@@ -354,7 +354,7 @@ async function refresh() {
   const [stats, live, feed, mine, keys, modules, watchers, recent, records] = await Promise.all([
     db.rpc("room_stats", { p_tz: TZ }),
     // Yours and your crewmates', as the database allows: who's studying, who's on a break.
-    db.from("live").select("user_id, session_id, subject, started_at, location, paused_at, paused_subject, banked_seconds, now_playing, checked_at"),
+    db.from("live").select("user_id, session_id, subject, started_at, sitting_started_at, location, paused_at, paused_subject, banked_seconds, now_playing, checked_at"),
     db.from("sessions").select("id, user_id, subject, started_at, ended_at, location").order("ended_at", { ascending: false }).limit(25),
     db.from("sessions").select("id, subject, started_at, ended_at, location").eq("user_id", uid).gte("started_at", new Date(Date.now() - 70 * 86400000).toISOString()).order("started_at", { ascending: false }).limit(400),
     db.from("link_keys").select("id, label, created_at, last_used_at").order("created_at"),
@@ -588,7 +588,8 @@ async function lockIn() {
   const subject = state.subject.trim();
   if (!subject) return toast("Pick a module first, or add one.", { bad: true });
   // A new sitting: whatever break was left over ends here.
-  const row = { user_id: state.user.id, session_id: crypto.randomUUID(), subject, started_at: new Date().toISOString(), location: state.place.trim() || null, paused_at: null, paused_subject: null, banked_seconds: 0 };
+  const now = new Date().toISOString();
+  const row = { user_id: state.user.id, session_id: crypto.randomUUID(), subject, started_at: now, sitting_started_at: now, location: state.place.trim() || null, paused_at: null, paused_subject: null, banked_seconds: 0 };
   const { error } = await db.from("live").upsert(row, { onConflict: "user_id" });
   if (error) return oops(error);
   state.live = row;
@@ -1704,13 +1705,30 @@ function lastTimeAt(value, now = new Date()) {
   return at > now ? ukAt(ukDay(now), value, -1) : at;
 }
 
-/** Fix the timer that's running: the module, when you really started, where you are, or when you stopped and forgot to say. */
+/**
+ * The parts of the running sitting already saved, oldest first. A break or a
+ * module switch saves the stretch so far and starts the clock again, so after
+ * one the session began with the first of these, not with the running stretch.
+ */
+function sittingStretches(live) {
+  if (!live?.sitting_started_at || !live.banked_seconds) return [];
+  const from = +new Date(live.sitting_started_at), to = +new Date(live.started_at);
+  return state.mine.filter((x) => +new Date(x.started_at) >= from && +new Date(x.ended_at) <= to)
+    .sort((a, b) => +new Date(a.started_at) - +new Date(b.started_at));
+}
+
+/** Fix the timer that's running: the module, when the session really began, where you are, or when you stopped and forgot to say. */
 function editTimerSheet() {
   const live = state.live;
   if (!live) return;
+  const earlier = sittingStretches(live);
+  const first = earlier[0] || null;
+  // The session began with its first saved part if there's been a break or a switch, otherwise with the clock.
+  const began = first ? first.started_at : live.started_at;
+  const restarted = new Date(live.started_at);
   const names = [...new Set([live.subject, ...activeModules().map((m) => m.name)])];
   const subject = h("select", { class: "input" }, names.map((name) => h("option", { value: name, selected: name === live.subject }, name)));
-  const from = h("input", { class: "input", type: "time", value: timeOf(live.started_at) });
+  const from = h("input", { class: "input", type: "time", value: timeOf(began) });
   const place = h("input", { class: "input", maxlength: 80, value: live.location || "", placeholder: "Main Library, café, home…" });
   const save = h("button", { class: "btn" }, "Save");
   const to = h("input", { class: "input", type: "time", "aria-describedby": "stopped-hint", oninput: () => { save.textContent = to.value ? "Save and stop" : "Save"; } });
@@ -1718,32 +1736,49 @@ function editTimerSheet() {
     if (!from.value) return toast("Pick when you started.", { bad: true });
     const now = new Date();
     // An unchanged time keeps its seconds; a changed one is the latest time it's been that o'clock.
-    const start = from.value === timeOf(live.started_at) ? new Date(live.started_at) : lastTimeAt(from.value, now);
+    const start = from.value === timeOf(began) ? new Date(began) : lastTimeAt(from.value, now);
     const end = to.value ? lastTimeAt(to.value, now) : null;
+    // What's still running starts at the restart after a break or switch; otherwise it's the whole session.
+    const running = first ? restarted : start;
+    if (end && first && end <= restarted) return toast(`That's before the clock restarted at ${timeOf(restarted)}. To drop that last part, use “Cancel this stretch”.`, { bad: true });
     if (end && end <= start) return toast(`That's before you started, at ${timeOf(start)}.`, { bad: true });
-    if (end && +end - +start < MIN_SESSION_MS) return toast("A session needs at least a minute.", { bad: true });
-    if (+(end || now) - +start > MAX_SESSION_MS) return toast(end ? "Keep a session under 16 hours." : "A timer can go back 16 hours at most.", { bad: true });
-    // The database only checks sessions against each other, so check the running one here.
-    const clash = state.mine.find((s) => +new Date(s.ended_at) > +start && +new Date(s.started_at) < +(end || now));
+    if (end && +end - +running < MIN_SESSION_MS) return toast("A session needs at least a minute.", { bad: true });
+    if (first && +new Date(first.ended_at) - +start < MIN_SESSION_MS) return toast(`The first part of this session ended at ${timeOf(first.ended_at)}, so it has to start before that.`, { bad: true });
+    if (first && +new Date(first.ended_at) - +start > MAX_SESSION_MS) return toast("Keep a session under 16 hours.", { bad: true });
+    if (+(end || now) - +running > MAX_SESSION_MS) return toast(end ? "Keep a session under 16 hours." : "A timer can go back 16 hours at most.", { bad: true });
+    // The database only checks sessions against each other, so check the running one here (and leave out this session's own parts,
+    // by id: the list may have been reloaded since the sheet opened).
+    const own = new Set(earlier.map((x) => x.id));
+    const until = first ? new Date(first.ended_at) : end || now;
+    const clash = state.mine.find((x) => !own.has(x.id) && +new Date(x.ended_at) > +start && +new Date(x.started_at) < +until);
     if (clash) return toast(`That would overlap your ${clash.subject} session, which ended at ${timeOf(clash.ended_at)}.`, { bad: true });
     // Editing it counts as being here.
-    const row = { subject: subject.value, started_at: start.toISOString(), checked_at: now.toISOString(), ...(state.me.share_location ? { location: place.value.trim() || null } : {}) };
+    const row = { subject: subject.value, checked_at: now.toISOString(), sitting_started_at: start.toISOString(), ...(state.me.share_location ? { location: place.value.trim() || null } : {}) };
+    if (!first) row.started_at = start.toISOString();
+    else if (+start !== +new Date(first.started_at)) {
+      // Moving the session's start moves its first saved part, and the time banked from before the break with it.
+      const { data: moved, error } = await db.from("sessions").update({ started_at: start.toISOString() }).eq("id", first.id).select("id");
+      if (error) return oops(sessionError(error));
+      if (!moved?.length) return oops({ message: "That part of the session isn't there any more." });
+      row.banked_seconds = Math.max(0, (live.banked_seconds || 0) + Math.round((+new Date(first.started_at) - +start) / 1000));
+    }
     // Only this timer: if it was stopped or replaced on another device, nothing changes.
     const { data, error } = await db.from("live").update(row).eq("user_id", state.user.id).eq("session_id", live.session_id)
-      .select("session_id, subject, started_at, location, banked_seconds, checked_at");
+      .select("session_id, subject, started_at, sitting_started_at, location, banked_seconds, checked_at");
     if (error) return oops(error);
     if (!data?.length) { close(); await refresh(); render(); return toast("That timer isn't running any more.", { bad: true }); }
     state.live = { ...live, ...data[0] };
     close();
     if (end) return finish({ end });
-    render(); refreshSoon();
+    await refresh(); render();
     toast("Timer updated.");
   });
   const close = sheet((box, close) => box.append(
     h("h2", null, "Edit your timer"),
     h("p", { class: "muted", style: { marginTop: "4px" } }, "Wrong module, started before you pressed the button, or forgot to stop? Fix it here."),
     h("label", { class: "field" }, h("span", { class: "label" }, "Module"), subject),
-    h("label", { class: "field" }, h("span", { class: "label" }, "Started at"), from),
+    h("label", { class: "field" }, h("span", { class: "label" }, "Started at"), from,
+      first ? h("span", { class: "small muted", style: { display: "block", marginTop: "6px" } }, `When the session began. The clock restarted at ${timeOf(restarted)} after a break or a switch.`) : null),
     h("label", { class: "field" }, h("span", { class: "label" }, "Stopped at"), to,
       h("span", { id: "stopped-hint", class: "small muted", style: { display: "block", marginTop: "6px" } }, "Forgot to stop it? Set when you did and it ends there. Leave it empty to keep going.")),
     state.me.share_location ? h("label", { class: "field" }, h("span", { class: "label" }, "Where (your crew sees this)"), place) : null,

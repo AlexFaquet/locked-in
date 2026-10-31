@@ -81,6 +81,9 @@ create table public.live (
   now_playing jsonb,
   -- When its owner last said "still here" (or edited the timer); see private.hidden_from.
   checked_at timestamptz,
+  -- When the whole sitting began. A break or a module switch saves the stretch so far and
+  -- starts the clock again (started_at); this stays put, so Edit shows the real start.
+  sitting_started_at timestamptz,
   updated_at timestamptz not null default now(),
   constraint live_shape check ((started_at is null) = (subject is null) and (started_at is null) = (session_id is null)),
   constraint live_pause_shape check ((paused_at is null) = (paused_subject is null) and (paused_at is null or started_at is null))
@@ -217,8 +220,8 @@ grant select on public.crews to authenticated;
 grant select, delete on public.crew_members to authenticated;
 grant select on public.live to authenticated;
 -- Every column but now_playing, so nobody can put a fake track on the board.
-grant insert (user_id, session_id, subject, started_at, location, paused_at, paused_subject, banked_seconds, checked_at) on public.live to authenticated;
-grant update (user_id, session_id, subject, started_at, location, paused_at, paused_subject, banked_seconds, checked_at) on public.live to authenticated;
+grant insert (user_id, session_id, subject, started_at, location, paused_at, paused_subject, banked_seconds, checked_at, sitting_started_at) on public.live to authenticated;
+grant update (user_id, session_id, subject, started_at, location, paused_at, paused_subject, banked_seconds, checked_at, sitting_started_at) on public.live to authenticated;
 grant select, insert on public.pings to authenticated;
 grant insert, delete on public.link_keys to authenticated;
 -- user_id is needed by the delete policy; key_hash is never readable.
@@ -259,10 +262,16 @@ begin
     new.paused_at := null;
     new.paused_subject := null;
     new.banked_seconds := 0;
+    new.sitting_started_at := new.started_at;
   end if;
   -- Nothing running and no break: there's no sitting to carry on.
   if new.started_at is null and new.paused_at is null then
     new.banked_seconds := 0;
+    new.sitting_started_at := null;
+  end if;
+  -- A timer started by something that doesn't know about sittings starts one; none starts after its own stretch.
+  if new.started_at is not null and (new.sitting_started_at is null or new.sitting_started_at > new.started_at) then
+    new.sitting_started_at := new.started_at;
   end if;
   -- Music and "still here" only mean anything while you're studying.
   if new.started_at is null then
