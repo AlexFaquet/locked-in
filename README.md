@@ -56,7 +56,12 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
   They come from your records (`private.badge_facts`), so once earned
   they're kept. Locked ones show how far along you are, *Next up* shows the
   three you're closest to, tapping one says who in the crew has it, and a
-  new one gets confetti.
+  new one gets confetti. The database records each badge when it's earned
+  (after a session's saved or changed, after a hype, and for everyone each
+  Monday for last week's board) and posts it to the earner's crew chats, one
+  card per batch; a secret one is announced only as "a secret badge". Its
+  rules mirror the app's, and a test checks they match. Watch links show
+  the owner's badges too.
 - **Profiles.** Tap anyone on the board, the podium, the live list or the
   feed to see their level, streak, badges, activity and recent sessions. Your
   own is under Me. *Activity* switches between **Weekly** (hours per week for

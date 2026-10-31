@@ -125,10 +125,12 @@ export const BADGES = [
   b("secret", "sevens", "🎰", "Lucky Sevens", "A session of exactly 77 minutes", "exactly_77", 1, "count", { secret: true, hint: "Feeling lucky?" }),
 ];
 
-/** Every badge against someone's records: earned or not, and how far along. */
+/** Every badge against someone's records: earned or not, and how far along. `facts.earned` is what the
+    database has recorded, which stays earned even if a session behind it is later deleted. */
 export const badgesFor = (facts = {}) => BADGES.map((badge) => {
   const value = Number(facts[badge.key]) || 0;
-  return { ...badge, value, got: value >= badge.goal, ratio: Math.min(1, value / badge.goal) };
+  const got = value >= badge.goal || (facts.earned || []).includes(badge.id);
+  return { ...badge, value, got, ratio: got ? 1 : Math.min(1, value / badge.goal) };
 });
 
 /** "2h 10m / 5h", "4 / 10 days" — how far along a badge is, for the ones you count towards. */

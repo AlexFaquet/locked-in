@@ -996,6 +996,9 @@ begin
                     or (l.started_at is null and l.paused_at > now() - interval '3 hours'))),
     'feed', coalesce((select jsonb_agg(jsonb_build_object('user_id', s.user_id, 'subject', s.subject, 'started_at', s.started_at, 'ended_at', s.ended_at, 'location', s.location) order by s.ended_at desc)
                       from (select * from public.sessions s where s.user_id = any(v_people) order by s.ended_at desc limit 25) s), '[]'::jsonb),
+    -- Badges: the owner's and their crew's (for who has what).
+    'badges', (select coalesce(jsonb_agg(jsonb_build_object('user_id', b.user_id, 'facts', b.facts)), '[]'::jsonb)
+               from private.badge_records(v_link.user_id, p_tz) b),
     'sessions', coalesce((select jsonb_agg(jsonb_build_object('subject', s.subject, 'started_at', s.started_at, 'ended_at', s.ended_at, 'location', s.location) order by s.started_at desc)
                           from (select s.subject, s.started_at, s.ended_at, s.location from public.sessions s
                                 where s.user_id = v_link.user_id and s.started_at > now() - interval '70 days'
@@ -1016,6 +1019,8 @@ create table public.messages (
   crew_id uuid not null references public.crews (id) on delete cascade,
   user_id uuid not null default auth.uid() references public.profiles (id) on delete cascade,
   body text not null check (char_length(btrim(body)) between 1 and 1000),
+  -- Badges this message announces (see Badges below). Only award_badges writes it; the app can't.
+  badges text[],
   created_at timestamptz not null default now()
 );
 create index messages_crew_id_created_at_idx on public.messages (crew_id, created_at desc);
@@ -1188,12 +1193,189 @@ as $$
 $$;
 revoke execute on function private.badge_facts(uuid, text) from public, anon, authenticated;
 
+/* ------------------------------------------------------------
+   Badges are recorded when earned and told to the earner's crews
+   in their chat, one message per batch. The rules mirror BADGES in
+   game.mjs (tests/badges.test.mjs checks they match). Earning is
+   checked after sessions are saved or changed, after a hype, and
+   for everyone each Monday just after the board resets.
+   ------------------------------------------------------------ */
+
+create table private.badge_rules (
+  id text primary key,
+  fact text not null,
+  goal integer not null check (goal > 0)
+);
+insert into private.badge_rules (id, fact, goal) values
+  ('marathon', 'longest_sitting', 180),
+  ('iron', 'longest_sitting', 300),
+  ('shift', 'longest_sitting', 480),
+  ('unit', 'longest_sitting', 720),
+  ('grindday', 'best_day', 360),
+  ('lifer', 'best_day', 600),
+  ('polymath', 'most_modules_day', 4),
+  ('weekend', 'best_weekend', 300),
+  ('warrior', 'best_week', 1200),
+  ('fulltime', 'best_week', 2400),
+  ('first', 'sessions', 1),
+  ('ten', 'total_minutes', 600),
+  ('fifty', 'total_minutes', 3000),
+  ('hundred', 'total_minutes', 6000),
+  ('royalty', 'total_minutes', 15000),
+  ('goat', 'total_minutes', 30000),
+  ('ascended', 'total_minutes', 60000),
+  ('hattrick', 'best_streak', 3),
+  ('fire', 'best_streak', 7),
+  ('unstoppable', 'best_streak', 14),
+  ('habit', 'best_streak', 30),
+  ('comeback', 'comebacks', 1),
+  ('early', 'early', 3),
+  ('dawn', 'dawn', 1),
+  ('night', 'late', 3),
+  ('midnight', 'through_midnight', 1),
+  ('3am', 'at_3am', 1),
+  ('friday', 'friday_night', 1),
+  ('halloween', 'halloween', 1),
+  ('christmas', 'christmas', 1),
+  ('newyear', 'new_year', 1),
+  ('valentine', 'valentines', 1),
+  ('buddy', 'together', 10),
+  ('party', 'most_alongside', 2),
+  ('house', 'most_alongside', 4),
+  ('champion', 'weeks_won', 1),
+  ('dynasty', 'best_win_run', 3),
+  ('hype', 'hypes_sent', 25),
+  ('fan', 'hypes_got', 25),
+  ('answer', 'exactly_42', 1),
+  ('sevens', 'exactly_77', 1);
+
+-- Who has earned what, and when. Kept even if a session behind it is later deleted.
+create table private.earned_badges (
+  user_id uuid not null references public.profiles (id) on delete cascade,
+  badge text not null references private.badge_rules (id),
+  earned_at timestamptz not null default now(),
+  primary key (user_id, badge)
+);
+alter table private.badge_rules enable row level security;
+alter table private.earned_badges enable row level security;
+revoke all on private.badge_rules, private.earned_badges from public, anon, authenticated;
+
+-- Records plus what's been earned, for the app and watch links.
+create function private.badge_records(p_user uuid, p_tz text default 'Europe/London')
+returns table (user_id uuid, facts jsonb)
+language sql stable security definer set search_path = ''
+as $$
+  select f.user_id, f.facts || jsonb_build_object('earned',
+    coalesce((select jsonb_agg(e.badge) from private.earned_badges e where e.user_id = f.user_id), '[]'::jsonb))
+  from private.badge_facts(p_user, p_tz) f
+$$;
+revoke execute on function private.badge_records(uuid, text) from public, anon, authenticated;
+
 -- For the app: your records and your crewmates', for badges and who has what.
 create function public.crew_badges(p_tz text default 'Europe/London')
 returns table (user_id uuid, facts jsonb)
 language sql stable security definer set search_path = ''
 as $$
-  select * from private.badge_facts((select auth.uid()), p_tz) where (select auth.uid()) is not null
+  select * from private.badge_records((select auth.uid()), p_tz) where (select auth.uid()) is not null
 $$;
 revoke execute on function public.crew_badges(text) from public, anon;
 grant execute on function public.crew_badges(text) to authenticated;
+
+-- Records anything newly earned and tells each of the earner's crews, once.
+create function private.award_badges(p_user uuid)
+returns void
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_new text[];
+begin
+  with facts as (select f.facts from private.badge_facts(p_user) f where f.user_id = p_user),
+  earned as (
+    select r.id from private.badge_rules r cross join facts
+    where coalesce((facts.facts ->> r.fact)::numeric, 0) >= r.goal
+  ),
+  added as (
+    insert into private.earned_badges (user_id, badge)
+    select p_user, e.id from earned e
+    on conflict do nothing
+    returning badge
+  )
+  select array_agg(added.badge) into v_new from added;
+  if v_new is null then return; end if;
+  insert into public.messages (crew_id, user_id, body, badges)
+  select cm.crew_id, p_user, case when cardinality(v_new) = 1 then 'earned a badge' else 'earned ' || cardinality(v_new) || ' badges' end, v_new
+  from public.crew_members cm where cm.user_id = p_user;
+end $$;
+revoke execute on function private.award_badges(uuid) from public, anon, authenticated;
+
+-- After sessions are saved or changed (a whole sync at once), and after a hype.
+-- Badges must never stop a session saving, so a failure here is only logged.
+create function private.award_for_rows()
+returns trigger
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_user uuid;
+begin
+  for v_user in select distinct r.user_id from changed r loop
+    begin
+      perform private.award_badges(v_user);
+    exception when others then
+      raise warning 'award_badges(%) failed: %', v_user, sqlerrm;
+    end;
+  end loop;
+  return null;
+end $$;
+revoke execute on function private.award_for_rows() from public, anon, authenticated;
+create trigger sessions_award_on_insert after insert on public.sessions
+  referencing new table as changed for each statement execute function private.award_for_rows();
+create trigger sessions_award_on_update after update on public.sessions
+  referencing new table as changed for each statement execute function private.award_for_rows();
+
+create function private.award_for_ping()
+returns trigger
+language plpgsql security definer set search_path = ''
+as $$
+begin
+  if new.kind = 'cheer' then
+    begin
+      perform private.award_badges(new.from_user);
+      perform private.award_badges(new.to_user);
+    exception when others then
+      raise warning 'award_badges after a hype failed: %', sqlerrm;
+    end;
+  end if;
+  return null;
+end $$;
+revoke execute on function private.award_for_ping() from public, anon, authenticated;
+create trigger pings_award after insert on public.pings
+  for each row execute function private.award_for_ping();
+
+-- Everyone, once a week just after the board resets: who won last week, and
+-- anything a crewmate's session earned them since they last saved one.
+create function private.award_everyone()
+returns void
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_user uuid;
+begin
+  for v_user in select p.id from public.profiles p loop
+    begin
+      perform private.award_badges(v_user);
+    exception when others then
+      raise warning 'award_badges(%) failed: %', v_user, sqlerrm;
+    end;
+  end loop;
+end $$;
+revoke execute on function private.award_everyone() from public, anon, authenticated;
+select cron.schedule('locked-in-badges', '10 0 * * 1', $job$ select private.award_everyone() $job$);
+
+-- When this went in (31 October 2026), what people had already earned was
+-- recorded quietly, so nobody's chat filled up.
+insert into private.earned_badges (user_id, badge)
+select p.id, r.id
+from public.profiles p
+cross join lateral (select f.facts from private.badge_facts(p.id) f where f.user_id = p.id) x
+join private.badge_rules r on coalesce((x.facts ->> r.fact)::numeric, 0) >= r.goal
+on conflict do nothing;

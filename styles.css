@@ -453,3 +453,11 @@ html.chatting .app { padding-bottom: max(calc(186px + env(safe-area-inset-bottom
 .next-badge strong { display: block; font: 600 16px var(--display); }
 .next-badge small { display: block; color: var(--muted); font-weight: 700; font-size: 13px; }
 .next-badge .badge-bar { margin: 6px 0 0; }
+
+/* A badge announced in the chat: a little celebration card, not a bubble. */
+.chat-news { display: grid; grid-template-columns: 44px minmax(0, 1fr); align-items: center; gap: 10px; width: 100%; margin: 12px 0 2px; padding: 10px 14px; border: 2px solid var(--gold); border-radius: 18px; background: color-mix(in srgb, var(--gold) 14%, var(--card)); color: var(--ink); text-align: left; font: inherit; }
+.chat-news-badge { font-size: 32px; line-height: 1; text-align: center; }
+.chat-news p { font-weight: 700; }
+.chat-news strong { font-weight: 800; }
+.chat-news small { display: block; color: var(--ink-2); font-weight: 700; font-size: 13px; }
+.chat-news time { display: block; margin-top: 2px; font-size: 11px; font-weight: 700; color: var(--muted); }

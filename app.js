@@ -6,7 +6,7 @@
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/+esm";
 import { SUPABASE_URL, SUPABASE_KEY, MUSIC } from "./config.js";
-import { levelProgress, streakFrom, badgesFor, badgeProgress, nextBadges, BADGE_GROUPS, standings, chaseLine, hm, clock, untilReset, ago, TZ, ukDay, ukAt, dayStart, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, hiddenFrom, unconfirmed } from "./game.mjs";
+import { levelProgress, streakFrom, badgesFor, badgeProgress, nextBadges, BADGES, BADGE_GROUPS, standings, chaseLine, hm, clock, untilReset, ago, TZ, ukDay, ukAt, dayStart, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, hiddenFrom, unconfirmed } from "./game.mjs";
 
 const db = createClient(SUPABASE_URL, SUPABASE_KEY);
 const EMOJI = ["📚", "🦊", "🐼", "🐸", "🦉", "🐯", "🐙", "🦄", "🐧", "🐨", "🦁", "🐵", "🐳", "🌵", "🍄", "⚡️", "🚀", "🎧", "☕️", "🧠"];
@@ -974,7 +974,7 @@ async function openChat(crewId = chatCrew()?.id) {
   state.chat.jump = true;
   render();
   if (!crewId || (!fresh && state.chat.loaded)) return;
-  const { data, error } = await db.from("messages").select("id, crew_id, user_id, body, created_at").eq("crew_id", crewId).order("created_at", { ascending: false }).limit(200);
+  const { data, error } = await db.from("messages").select("id, crew_id, user_id, body, badges, created_at").eq("crew_id", crewId).order("created_at", { ascending: false }).limit(200);
   if (state.chat.crew !== crewId) return;
   if (error) return oops(error, "Couldn't load the chat.");
   state.chat.messages = (data || []).reverse();
@@ -992,7 +992,7 @@ function gotMessage(m) {
   if (m.user_id !== state.user.id && document.hidden && "Notification" in window && Notification.permission === "granted") {
     const who = byId(m.user_id);
     const crew = state.crews.find((c) => c.id === m.crew_id);
-    try { new Notification(`${who?.emoji || "💬"} ${who?.name || "Someone"} · ${crew?.name || "your crew"}`, { body: m.body, icon: "icon-180.png", tag: `chat:${m.crew_id}` }); } catch (_) {}
+    try { new Notification(`${who?.emoji || "💬"} ${who?.name || "Someone"} · ${crew?.name || "your crew"}`, { body: messageText(m), icon: "icon-180.png", tag: `chat:${m.crew_id}` }); } catch (_) {}
   }
   keepFocus(render);
 }
@@ -1011,7 +1011,7 @@ async function sendMessage() {
   if (!crew || !body) return;
   chatInput.value = "";
   growChatInput();
-  const { data, error } = await db.from("messages").insert({ crew_id: crew.id, body }).select("id, crew_id, user_id, body, created_at").single();
+  const { data, error } = await db.from("messages").insert({ crew_id: crew.id, body }).select("id, crew_id, user_id, body, badges, created_at").single();
   if (error) { chatInput.value = body; growChatInput(); return oops(error, "That didn't send. Try again?"); }
   state.chat.jump = true;
   gotMessage(data);
@@ -1022,6 +1022,31 @@ async function deleteMessage(m) {
   const { error } = await db.from("messages").delete().eq("id", m.id);
   if (error) return oops(error);
   lostMessage(m.id);
+}
+
+/** The badges a message announces, in the app's order. A secret one stays a secret. */
+const newsBadges = (m) => BADGES.filter((badge) => m.badges?.includes(badge.id));
+const badgeLabel = (badge) => (badge.secret ? "❓ a secret badge 🤫" : `${badge.icon} ${badge.name}`);
+
+/** A message as plain text, for a notification. */
+function messageText(m) {
+  if (!m.badges?.length) return m.body;
+  const won = newsBadges(m);
+  return won.length === 1 ? `earned ${badgeLabel(won[0])}` : `earned ${won.length} badges: ${won.map(badgeLabel).join(", ")}`;
+}
+
+/** "Leonardo earned 👻 3am Club": the database posts these when someone earns badges. Yours you can delete. */
+function badgeNews(m) {
+  const who = byId(m.user_id);
+  const mine = m.user_id === state.user.id;
+  const won = newsBadges(m);
+  return h(mine ? "button" : "div", { class: "chat-news", ...(mine ? { type: "button", title: "Delete", onclick: () => deleteMessage(m) } : {}) },
+    h("span", { class: "chat-news-badge", "aria-hidden": "true" }, won.length === 1 ? (won[0].secret ? "❓" : won[0].icon) : "🏅"),
+    h("div", null,
+      h("p", null, h("strong", null, `${who?.emoji || ""} ${mine ? "You" : who?.name || "Someone who left"}`.trim()),
+        won.length === 1 ? ` earned ${won[0].secret ? "a secret badge 🤫" : won[0].name}` : ` earned ${won.length || "a"} ${won.length === 1 ? "badge" : "badges"}`),
+      h("small", null, won.length === 1 ? (won[0].secret ? "What could it be?" : won[0].detail) : won.map(badgeLabel).join(" · ")),
+      h("time", { datetime: m.created_at }, timeOf(m.created_at))));
 }
 
 /** Links in a message, and only http(s) ones, become tappable; everything else stays plain text. */
@@ -1050,6 +1075,7 @@ function chatView() {
   for (const m of state.chat.messages) {
     const day = ukDay(new Date(m.created_at));
     if (day !== lastDay) { lines.push(h("p", { class: "chat-day" }, dayHeading(m.created_at))); lastSender = null; }
+    if (m.badges?.length) { lines.push(badgeNews(m)); lastDay = day; lastSender = null; continue; }
     // Messages from the same person within a few minutes sit together under one name.
     const together = lastSender === m.user_id && +new Date(m.created_at) - lastAt < 5 * 60000;
     const mine = m.user_id === state.user.id;
@@ -1199,6 +1225,8 @@ function badgesSection(person) {
   if (!facts) return h("section", { class: "section" }, h("div", { class: "section-head" }, h("h2", null, "Badges")), h("div", { class: "card empty" }, "Badges show up once the crew's loaded."));
   const badges = badgesFor(facts);
   const mine = person.user_id === state.user.id;
+  // On a watch page the person is the one who shared it, so it's their name, not "you".
+  const you = mine && !state.watching;
   const crew = [...state.badgeFacts].filter(([id]) => byId(id)).map(([, f]) => f);
   const holders = (badge) => crew.filter((f) => (Number(f[badge.key]) || 0) >= badge.goal).length;
   const tile = (badge) => {
@@ -1208,7 +1236,7 @@ function badgesSection(person) {
     // Earned, and nobody else in a crew of three or more has it.
     const rare = badge.got && have === 1 && crew.length >= 3;
     const node = h("button", { type: "button", class: `badge ${badge.got ? "got" : "locked"}`, "aria-label": hidden ? "Secret badge" : `${badge.name}: ${badge.detail}${badge.got ? ", earned" : progress ? `, ${progress}` : ""}` },
-      rare ? h("i", { class: "badge-rare" }, mine ? "Only you" : `Only ${person.name}`) : null,
+      rare ? h("i", { class: "badge-rare" }, you ? "Only you" : `Only ${person.name}`) : null,
       h("b", { "aria-hidden": "true" }, hidden ? "❓" : badge.icon),
       h("strong", null, hidden ? "???" : badge.name),
       h("small", null, hidden ? badge.hint : badge.detail),
@@ -1217,7 +1245,7 @@ function badgesSection(person) {
     explain(node, () => [
       hidden ? "❓ Secret badge" : `${badge.icon} ${badge.name}`,
       hidden ? badge.hint : badge.detail,
-      badge.got ? (mine ? "You've got it 🏅" : `${person.name} has it 🏅`) : progress ? `${progress} · ${badgeToGo(badge)}` : "Not yet",
+      badge.got ? (you ? "You've got it 🏅" : `${person.name} has it 🏅`) : progress ? `${progress} · ${badgeToGo(badge)}` : "Not yet",
       have ? `${have} of ${crew.length} in the crew ${have === 1 ? "has" : "have"} it` : "Nobody in the crew has it yet",
     ]);
     return node;
@@ -1555,6 +1583,7 @@ function paintWatch(data) {
   state.liveRows = new Map(data.live.map((row) => [row.user_id, row]));
   state.breaks = data.live.filter((row) => !row.started_at && row.paused_at && byId(row.user_id));
   state.feed = data.feed;
+  state.badgeFacts = new Map((data.badges || []).map((row) => [row.user_id, row.facts]));
   const who = { ...EMPTY_STATS, ...byId(data.me) };
   document.title = `${who.name} · Locked In`;
   const tab = readStored(WATCH_TAB_KEY) === "crew" ? "crew" : "person";
@@ -1589,6 +1618,7 @@ function watchPerson(who, { sessions }) {
     status,
     heroCard(who),
     activityCard(who, sessions, "Activity"),
+    badgesSection(who),
     recentSessions(sessions, who.name, 10),
     h("p", { class: "small muted watch-note" }, `${who.name} shared this page with you. It keeps itself up to date, and ${who.name} can turn the link off at any time.`),
   ];
