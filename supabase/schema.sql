@@ -1036,3 +1036,164 @@ grant insert (crew_id, body) on public.messages to authenticated;
 
 -- New messages arrive live (RLS-checked). A delete arrives as just its id.
 alter publication supabase_realtime add table public.messages;
+
+/* ------------------------------------------------------------
+   Badges: everyone's records, worked out from all their saved
+   sessions (and their hypes and crew boards), for the app to turn
+   into badges (BADGES in game.mjs). Records, not "right now", so a
+   badge once earned is kept. Back-to-back sessions (a module switch
+   saves one and starts the next at the same moment) count as one
+   sitting; a pause ends it. All days and hours are St Andrews time.
+   ------------------------------------------------------------ */
+
+create function private.badge_facts(p_user uuid, p_tz text default 'Europe/London')
+returns table (user_id uuid, facts jsonb)
+language sql stable security definer set search_path = ''
+as $$
+  with people as (
+    select p_user as id
+    union
+    select theirs.user_id from public.crew_members mine
+    join public.crew_members theirs on theirs.crew_id = mine.crew_id
+    where mine.user_id = p_user
+  ),
+  -- Each person's crewmates, across all of their crews.
+  mates as (
+    select distinct a.user_id as id, b.user_id as mate
+    from public.crew_members a
+    join public.crew_members b on b.crew_id = a.crew_id and b.user_id <> a.user_id
+    where a.user_id in (select id from people)
+  ),
+  s as (
+    select se.user_id, lower(btrim(se.subject)) as module, se.started_at, se.ended_at,
+           se.started_at at time zone p_tz as ls, se.ended_at at time zone p_tz as le,
+           extract(epoch from se.ended_at - se.started_at) / 60 as minutes
+    from public.sessions se where se.user_id in (select id from people)
+  ),
+  chained as (
+    select x.*, sum(case when x.prev_end is null or x.started_at - x.prev_end > interval '1 minute' then 1 else 0 end)
+                  over (partition by x.user_id order by x.started_at) as sitting
+    from (select s.*, lag(s.ended_at) over (partition by s.user_id order by s.started_at) as prev_end from s) x
+  ),
+  sittings as (
+    select c.user_id, extract(epoch from max(c.ended_at) - min(c.started_at)) / 60 as minutes
+    from chained c group by c.user_id, c.sitting
+  ),
+  daily as (
+    select s.user_id, s.ls::date as day, sum(s.minutes) as minutes, count(distinct s.module) as modules
+    from s group by 1, 2
+  ),
+  weekly as (
+    select s.user_id, date_trunc('week', s.ls) as week, sum(s.minutes) as minutes,
+           sum(s.minutes) filter (where extract(isodow from s.ls) in (6, 7)) as weekend
+    from s group by 1, 2
+  ),
+  good_days as (select d.user_id, d.day from daily d where d.minutes >= 30),
+  streaks as (
+    select g.user_id, count(*) as days
+    from (select gd.user_id, gd.day, gd.day - (row_number() over (partition by gd.user_id order by gd.day))::int as run from good_days gd) g
+    group by g.user_id, g.run
+  ),
+  -- A big day after at least a week with nothing.
+  comebacks as (
+    select d.user_id, count(*) as n
+    from (select dd.*, lag(dd.day) over (partition by dd.user_id order by dd.day) as before from daily dd) d
+    where d.before is not null and d.day - d.before >= 8 and d.minutes >= 120
+    group by d.user_id
+  ),
+  -- Your sessions with a crewmate locked in alongside for at least half an hour.
+  together as (
+    select a.user_id, count(*) as n
+    from s a
+    where exists (
+      select 1 from mates m join public.sessions b on b.user_id = m.mate
+      where m.id = a.user_id and b.started_at < a.ended_at and b.ended_at > a.started_at
+        and least(a.ended_at, b.ended_at) - greatest(a.started_at, b.started_at) >= interval '30 minutes')
+    group by a.user_id
+  ),
+  -- The most crewmates locked in at one moment while you were.
+  crowds as (
+    select a.user_id, max(c.n) as most
+    from s a
+    cross join lateral (
+      select (select count(distinct b2.user_id) from mates m2 join public.sessions b2 on b2.user_id = m2.mate
+              where m2.id = a.user_id and b2.started_at <= t.at and b2.ended_at > t.at) as n
+      from (select a.started_at as at
+            union
+            select b.started_at from mates m join public.sessions b on b.user_id = m.mate
+            where m.id = a.user_id and b.started_at > a.started_at and b.started_at < a.ended_at) t
+    ) c
+    group by a.user_id
+  ),
+  -- Finished weeks on each of their crews' boards (two or more people on it).
+  crew_weeks as (
+    select cm.crew_id, se.user_id, date_trunc('week', se.started_at at time zone p_tz) as week,
+           sum(extract(epoch from se.ended_at - se.started_at)) as seconds
+    from public.crew_members cm join public.sessions se on se.user_id = cm.user_id
+    where cm.crew_id in (select c2.crew_id from public.crew_members c2 where c2.user_id in (select id from people))
+    group by 1, 2, 3
+  ),
+  places as (
+    select w.*, rank() over (partition by w.crew_id, w.week order by w.seconds desc) as place,
+           count(*) over (partition by w.crew_id, w.week) as racers
+    from crew_weeks w
+    where w.week < date_trunc('week', now() at time zone p_tz)
+  ),
+  wins as (select distinct p.user_id, p.week from places p where p.place = 1 and p.racers >= 2),
+  win_runs as (
+    select w.user_id, count(*) as weeks
+    from (select wi.*, wi.week - (row_number() over (partition by wi.user_id order by wi.week)) * interval '7 days' as run from wins wi) w
+    group by w.user_id, w.run
+  ),
+  hype as (
+    select pe.id as user_id,
+           (select count(*) from public.pings p where p.from_user = pe.id and p.kind = 'cheer') as sent,
+           (select count(*) from public.pings p where p.to_user = pe.id and p.kind = 'cheer') as got,
+           (select count(*) from public.pings p where p.from_user = pe.id and p.kind = 'joining') as coming
+    from people pe
+  )
+  select pe.id, jsonb_build_object(
+    'sessions',         (select count(*) from s where s.user_id = pe.id),
+    'total_minutes',    coalesce((select round(sum(s.minutes)) from s where s.user_id = pe.id), 0),
+    'longest_sitting',  coalesce((select round(max(st.minutes)) from sittings st where st.user_id = pe.id), 0),
+    'best_day',         coalesce((select round(max(d.minutes)) from daily d where d.user_id = pe.id), 0),
+    'best_week',        coalesce((select round(max(w.minutes)) from weekly w where w.user_id = pe.id), 0),
+    'best_weekend',     coalesce((select round(max(w.weekend)) from weekly w where w.user_id = pe.id), 0),
+    'best_streak',      coalesce((select max(k.days) from streaks k where k.user_id = pe.id), 0),
+    'most_modules_day', coalesce((select max(d.modules) from daily d where d.user_id = pe.id), 0),
+    'early',            (select count(*) from s where s.user_id = pe.id and extract(hour from s.ls) < 8),
+    'dawn',             (select count(*) from s where s.user_id = pe.id and extract(hour from s.ls) between 4 and 5),
+    'late',             (select count(*) from s where s.user_id = pe.id and extract(hour from s.ls) >= 22),
+    'through_midnight', (select count(*) from s where s.user_id = pe.id and s.ls::date < (s.le - interval '1 second')::date),
+    'at_3am',           (select count(*) from s where s.user_id = pe.id
+                          and ((s.ls::date + time '03:00' >= s.ls and s.ls::date + time '03:00' < s.le)
+                            or (s.ls::date + 1 + time '03:00' >= s.ls and s.ls::date + 1 + time '03:00' < s.le))),
+    'friday_night',     (select count(*) from s where s.user_id = pe.id and extract(isodow from s.ls) = 5 and extract(hour from s.ls) >= 20),
+    'halloween',        (select count(*) from s where s.user_id = pe.id and to_char(s.ls, 'MM-DD') = '10-31'),
+    'christmas',        (select count(*) from s where s.user_id = pe.id and to_char(s.ls, 'MM-DD') = '12-25'),
+    'new_year',         (select count(*) from s where s.user_id = pe.id and to_char(s.ls, 'MM-DD') = '01-01'),
+    'valentines',       (select count(*) from s where s.user_id = pe.id and to_char(s.ls, 'MM-DD') = '02-14'),
+    'comebacks',        coalesce((select c.n from comebacks c where c.user_id = pe.id), 0),
+    'exactly_42',       (select count(*) from s where s.user_id = pe.id and round(s.minutes) = 42),
+    'exactly_77',       (select count(*) from s where s.user_id = pe.id and round(s.minutes) = 77),
+    'together',         coalesce((select t.n from together t where t.user_id = pe.id), 0),
+    'most_alongside',   coalesce((select c.most from crowds c where c.user_id = pe.id), 0),
+    'weeks_won',        (select count(*) from wins w where w.user_id = pe.id),
+    'best_win_run',     coalesce((select max(r.weeks) from win_runs r where r.user_id = pe.id), 0),
+    'hypes_sent',       (select h.sent from hype h where h.user_id = pe.id),
+    'hypes_got',        (select h.got from hype h where h.user_id = pe.id),
+    'coming_sent',      (select h.coming from hype h where h.user_id = pe.id)
+  )
+  from people pe
+$$;
+revoke execute on function private.badge_facts(uuid, text) from public, anon, authenticated;
+
+-- For the app: your records and your crewmates', for badges and who has what.
+create function public.crew_badges(p_tz text default 'Europe/London')
+returns table (user_id uuid, facts jsonb)
+language sql stable security definer set search_path = ''
+as $$
+  select * from private.badge_facts((select auth.uid()), p_tz) where (select auth.uid()) is not null
+$$;
+revoke execute on function public.crew_badges(text) from public, anon;
+grant execute on function public.crew_badges(text) to authenticated;

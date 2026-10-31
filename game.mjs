@@ -59,18 +59,88 @@ export function streakFrom(days = {}, now = new Date(), minimum = 30) {
   return streak;
 }
 
-export const BADGES = [
-  { id: "first", icon: "🔐", name: "First Lock", detail: "Finish your first session", earned: (s) => s.session_count >= 1 },
-  { id: "early", icon: "🌅", name: "Early Bird", detail: "Start 3 sessions before 8am", earned: (s) => s.early_sessions >= 3 },
-  { id: "night", icon: "🦉", name: "Night Owl", detail: "Start 3 sessions after 10pm", earned: (s) => s.late_sessions >= 3 },
-  { id: "marathon", icon: "🏃", name: "Marathon", detail: "One session of 3 hours", earned: (s) => s.longest_minutes >= 180 },
-  { id: "fire", icon: "🔥", name: "On Fire", detail: "A 7-day streak", earned: (s, streak) => streak >= 7 },
-  { id: "ten", icon: "⏳", name: "Ten Hours", detail: "10 hours in total", earned: (s) => s.total_minutes >= 600 },
-  { id: "warrior", icon: "⚔️", name: "Week Warrior", detail: "20 hours in one week", earned: (s) => s.week_minutes >= 1200 },
-  { id: "fifty", icon: "💎", name: "Fifty Club", detail: "50 hours in total", earned: (s) => s.total_minutes >= 3000 },
-  { id: "hundred", icon: "🏛️", name: "Centurion", detail: "100 hours in total", earned: (s) => s.total_minutes >= 6000 },
+/* Badges. Each comes from one of someone's records (private.badge_facts:
+   their longest sitting, best day, best streak…), so once earned it's kept.
+   `key` is the record and `goal` what it takes; `unit` says how to show the
+   progress. A secret one shows as ??? until someone has it. */
+export const BADGE_GROUPS = [
+  ["grind", "The grind", "One sitting, no pause. Switching module doesn't stop the clock."],
+  ["days", "Big days"],
+  ["hours", "Milestones"],
+  ["streaks", "Streaks", "Days in a row with 30+ minutes."],
+  ["clock", "Odd hours"],
+  ["calendar", "Days that count"],
+  ["crew", "Crew"],
+  ["secret", "Secret"],
 ];
-export const badgesFor = (stats, streak) => BADGES.map((badge) => ({ ...badge, got: Boolean(badge.earned(stats, streak)) }));
+const b = (group, id, icon, name, detail, key, goal, unit = "count", extra = {}) => ({ group, id, icon, name, detail, key, goal, unit, ...extra });
+export const BADGES = [
+  b("grind", "marathon", "🏃", "Marathon", "3 hours in one sitting", "longest_sitting", 180, "time"),
+  b("grind", "iron", "🦾", "Iron Will", "5 hours in one sitting", "longest_sitting", 300, "time"),
+  b("grind", "shift", "🧟", "The Full Shift", "8 hours in one sitting", "longest_sitting", 480, "time"),
+  b("grind", "unit", "🌋", "Absolute Unit", "12 hours in one sitting", "longest_sitting", 720, "time"),
+
+  b("days", "grindday", "📅", "Grind Day", "6 hours in one day", "best_day", 360, "time"),
+  b("days", "lifer", "🐀", "Library Lifer", "10 hours in one day", "best_day", 600, "time"),
+  b("days", "polymath", "🧠", "Polymath", "4 different modules in one day", "most_modules_day", 4),
+  b("days", "weekend", "🛋️", "Weekend Warrior", "5 hours over one weekend", "best_weekend", 300, "time"),
+  b("days", "warrior", "⚔️", "Week Warrior", "20 hours in one week", "best_week", 1200, "time"),
+  b("days", "fulltime", "💼", "Full-Time Student", "40 hours in one week", "best_week", 2400, "time"),
+
+  b("hours", "first", "🔐", "First Lock", "Finish your first session", "sessions", 1),
+  b("hours", "ten", "⏳", "Ten Hours", "10 hours in total", "total_minutes", 600, "time"),
+  b("hours", "fifty", "💎", "Fifty Club", "50 hours in total", "total_minutes", 3000, "time"),
+  b("hours", "hundred", "🏛️", "Centurion", "100 hours in total", "total_minutes", 6000, "time"),
+  b("hours", "royalty", "👑", "Royalty", "250 hours in total", "total_minutes", 15000, "time"),
+  b("hours", "goat", "🐐", "The GOAT", "500 hours in total", "total_minutes", 30000, "time"),
+  b("hours", "ascended", "🌌", "Ascended", "1,000 hours in total", "total_minutes", 60000, "time"),
+
+  b("streaks", "hattrick", "🌱", "Hat Trick", "A 3-day streak", "best_streak", 3, "days"),
+  b("streaks", "fire", "🔥", "On Fire", "A 7-day streak", "best_streak", 7, "days"),
+  b("streaks", "unstoppable", "☄️", "Unstoppable", "A 14-day streak", "best_streak", 14, "days"),
+  b("streaks", "habit", "🗓️", "Habit Formed", "A 30-day streak", "best_streak", 30, "days"),
+  b("streaks", "comeback", "🦅", "Comeback Kid", "2 hours in a day, after a week off", "comebacks", 1),
+
+  b("clock", "early", "🌅", "Early Bird", "Start 3 sessions before 8am", "early", 3),
+  b("clock", "dawn", "🐓", "Dawn Patrol", "Start a session between 4 and 6am", "dawn", 1),
+  b("clock", "night", "🦉", "Night Owl", "Start 3 sessions after 10pm", "late", 3),
+  b("clock", "midnight", "🕯️", "Midnight Oil", "Study through midnight", "through_midnight", 1),
+  b("clock", "3am", "👻", "3am Club", "Be locked in at 3am", "at_3am", 1),
+  b("clock", "friday", "🪩", "Friday Night Lights", "Lock in on a Friday after 8pm", "friday_night", 1),
+
+  b("calendar", "halloween", "🎃", "Spooky Scholar", "Study on Halloween", "halloween", 1),
+  b("calendar", "christmas", "🎄", "Holiday Hustle", "Study on Christmas Day", "christmas", 1),
+  b("calendar", "newyear", "🎆", "New Year, New Me", "Study on 1 January", "new_year", 1),
+  b("calendar", "valentine", "💘", "Library Date", "Study on Valentine's Day", "valentines", 1),
+
+  b("crew", "buddy", "👯", "Study Buddy", "10 sessions with a crewmate locked in alongside", "together", 10),
+  b("crew", "party", "🥳", "Study Party", "Locked in with 2 crewmates at once", "most_alongside", 2),
+  b("crew", "house", "🏟️", "Full House", "Locked in with 4 crewmates at once", "most_alongside", 4),
+  b("crew", "champion", "🥇", "Champion", "Win a week on your crew's board", "weeks_won", 1),
+  b("crew", "dynasty", "🏆", "Dynasty", "Win 3 weeks in a row", "best_win_run", 3),
+  b("crew", "hype", "📣", "Hype Machine", "Send 25 hypes", "hypes_sent", 25),
+  b("crew", "fan", "🌟", "Fan Favourite", "Get 25 hypes", "hypes_got", 25),
+
+  b("secret", "answer", "🤖", "The Answer", "A session of exactly 42 minutes", "exactly_42", 1, "count", { secret: true, hint: "Life, the universe and everything" }),
+  b("secret", "sevens", "🎰", "Lucky Sevens", "A session of exactly 77 minutes", "exactly_77", 1, "count", { secret: true, hint: "Feeling lucky?" }),
+];
+
+/** Every badge against someone's records: earned or not, and how far along. */
+export const badgesFor = (facts = {}) => BADGES.map((badge) => {
+  const value = Number(facts[badge.key]) || 0;
+  return { ...badge, value, got: value >= badge.goal, ratio: Math.min(1, value / badge.goal) };
+});
+
+/** "2h 10m / 5h", "4 / 10 days" — how far along a badge is, for the ones you count towards. */
+export function badgeProgress(badge) {
+  if (badge.got || badge.goal <= 1) return null;
+  if (badge.unit === "time") return `${hm(badge.value)} / ${badge.goal % 60 ? hm(badge.goal) : `${(badge.goal / 60).toLocaleString("en-GB")}h`}`;
+  return `${badge.value} / ${badge.goal}${badge.unit === "days" ? " days" : ""}`;
+}
+
+/** The badges someone is closest to, for "next up": started, not secret, nearest first. */
+export const nextBadges = (badges, count = 3) =>
+  badges.filter((badge) => !badge.got && !badge.secret && badge.ratio > 0 && badge.goal > 1).sort((a, b) => b.ratio - a.ratio).slice(0, count);
 
 /** This week's race, highest first. Ties go to whoever has the longer streak, then alphabetically. */
 export function standings(people, key = "week_minutes", now = new Date()) {

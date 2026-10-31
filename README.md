@@ -47,8 +47,16 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
   *Yes, still going* puts it all back; *I stopped earlier* opens Edit, where
   *Stopped at* saves what you really did.
 - **Earn XP** — a point a minute. Levels get steeper (Level 2 at 2.5 hours,
-  Level 5 at 40, Level 10 at 202.5). Streaks count days with 30+ minutes;
-  badges are for early starts, late nights, long sessions and milestones.
+  Level 5 at 40, Level 10 at 202.5). Streaks count days with 30+ minutes.
+- **Badges** — 41 of them, in eight groups: the grind (3, 5, 8 and 12 hours
+  in one sitting, where a module switch doesn't break it), big days and
+  weeks, hour milestones up to 1,000, streaks, odd hours (3am Club, Dawn
+  Patrol, Midnight Oil…), days that count (Halloween, Christmas…), crew ones
+  (studying alongside each other, winning the week, hype) and two secrets.
+  They come from your records (`private.badge_facts`), so once earned
+  they're kept. Locked ones show how far along you are, *Next up* shows the
+  three you're closest to, tapping one says who in the crew has it, and a
+  new one gets confetti.
 - **Profiles.** Tap anyone on the board, the podium, the live list or the
   feed to see their level, streak, badges, activity and recent sessions. Your
   own is under Me. *Activity* switches between **Weekly** (hours per week for

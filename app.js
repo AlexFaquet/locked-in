@@ -6,7 +6,7 @@
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/+esm";
 import { SUPABASE_URL, SUPABASE_KEY, MUSIC } from "./config.js";
-import { levelProgress, streakFrom, badgesFor, standings, chaseLine, hm, clock, untilReset, ago, TZ, ukDay, ukAt, dayStart, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, hiddenFrom, unconfirmed } from "./game.mjs";
+import { levelProgress, streakFrom, badgesFor, badgeProgress, nextBadges, BADGE_GROUPS, standings, chaseLine, hm, clock, untilReset, ago, TZ, ukDay, ukAt, dayStart, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, hiddenFrom, unconfirmed } from "./game.mjs";
 
 const db = createClient(SUPABASE_URL, SUPABASE_KEY);
 const EMOJI = ["📚", "🦊", "🐼", "🐸", "🦉", "🐯", "🐙", "🦄", "🐧", "🐨", "🦁", "🐵", "🐳", "🌵", "🍄", "⚡️", "🚀", "🎧", "☕️", "🧠"];
@@ -30,6 +30,8 @@ const state = {
   watching: null,
   // Crew chat: the latest messages across your crews (for unread counts), and the open crew's conversation.
   recent: [], chat: { crew: null, messages: [], loaded: false },
+  // Everyone's records for badges (crew_badges): user id → facts.
+  badgeFacts: new Map(),
   tab: readStored(TAB_KEY) || "now", board: readStored(BOARD_KEY) || "week", subject: "", place: "",
 };
 let channel = null;
@@ -349,7 +351,7 @@ async function loadCrews() {
 
 async function refresh() {
   const uid = state.user.id;
-  const [stats, live, feed, mine, keys, modules, watchers, recent] = await Promise.all([
+  const [stats, live, feed, mine, keys, modules, watchers, recent, records] = await Promise.all([
     db.rpc("room_stats", { p_tz: TZ }),
     // Yours and your crewmates', as the database allows: who's studying, who's on a break.
     db.from("live").select("user_id, session_id, subject, started_at, location, paused_at, paused_subject, banked_seconds, now_playing, checked_at"),
@@ -359,10 +361,11 @@ async function refresh() {
     db.rpc("my_subject_stats", { p_tz: TZ }),
     db.from("watch_links").select("id, label, created_at, last_seen_at").order("created_at"),
     db.from("messages").select("id, crew_id, user_id, created_at").order("created_at", { ascending: false }).limit(60),
+    db.rpc("crew_badges", { p_tz: TZ }),
     loadCrews(),
   ]);
   if (MUSIC) db.rpc("my_music").then(({ data }) => { if (data) { const changed = JSON.stringify(data) !== JSON.stringify(state.music); state.music = data; if (changed && state.tab === "me") keepFocus(render); } });
-  const failed = [stats, live, feed, mine, keys, modules, watchers, recent].find((r) => r.error);
+  const failed = [stats, live, feed, mine, keys, modules, watchers, recent, records].find((r) => r.error);
   if (failed) return oops(failed.error, "Couldn't load your crew.");
   state.people = stats.data || [];
   state.liveRows = new Map((live.data || []).map((row) => [row.user_id, row]));
@@ -375,6 +378,8 @@ async function refresh() {
   state.keys = keys.data || [];
   state.watchers = watchers.data || [];
   state.recent = recent.data || [];
+  state.badgeFacts = new Map((records.data || []).map((row) => [row.user_id, row.facts]));
+  announceBadges();
   state.modules = modules.data || [];
   scheduleStillThere();
 }
@@ -1181,11 +1186,77 @@ function heroCard(person) {
       h("div", null, h("strong", null, hm(person.total_minutes)), h("span", null, "All time"))));
 }
 
+/** What's left for a badge: "1h 20m to go", "4 more days". */
+function badgeToGo(badge) {
+  const left = badge.goal - badge.value;
+  if (badge.unit === "time") return `${hm(left)} to go`;
+  return `${left} more${badge.unit === "days" ? (left === 1 ? " day" : " days") : ""}`;
+}
+
+/** Someone's badges, grouped, with how far along the locked ones are and who else in the crew has each. */
 function badgesSection(person) {
-  const badges = badgesFor(person, streakFrom(person.days));
+  const facts = state.badgeFacts.get(person.user_id);
+  if (!facts) return h("section", { class: "section" }, h("div", { class: "section-head" }, h("h2", null, "Badges")), h("div", { class: "card empty" }, "Badges show up once the crew's loaded."));
+  const badges = badgesFor(facts);
+  const mine = person.user_id === state.user.id;
+  const crew = [...state.badgeFacts].filter(([id]) => byId(id)).map(([, f]) => f);
+  const holders = (badge) => crew.filter((f) => (Number(f[badge.key]) || 0) >= badge.goal).length;
+  const tile = (badge) => {
+    const hidden = badge.secret && !badge.got;
+    const progress = badgeProgress(badge);
+    const have = holders(badge);
+    // Earned, and nobody else in a crew of three or more has it.
+    const rare = badge.got && have === 1 && crew.length >= 3;
+    const node = h("button", { type: "button", class: `badge ${badge.got ? "got" : "locked"}`, "aria-label": hidden ? "Secret badge" : `${badge.name}: ${badge.detail}${badge.got ? ", earned" : progress ? `, ${progress}` : ""}` },
+      rare ? h("i", { class: "badge-rare" }, mine ? "Only you" : `Only ${person.name}`) : null,
+      h("b", { "aria-hidden": "true" }, hidden ? "❓" : badge.icon),
+      h("strong", null, hidden ? "???" : badge.name),
+      h("small", null, hidden ? badge.hint : badge.detail),
+      progress ? h("span", { class: "badge-bar", "aria-hidden": "true" }, h("span", { style: { width: `${Math.max(4, badge.ratio * 100)}%` } })) : null,
+      progress ? h("em", null, progress) : null);
+    explain(node, () => [
+      hidden ? "❓ Secret badge" : `${badge.icon} ${badge.name}`,
+      hidden ? badge.hint : badge.detail,
+      badge.got ? (mine ? "You've got it 🏅" : `${person.name} has it 🏅`) : progress ? `${progress} · ${badgeToGo(badge)}` : "Not yet",
+      have ? `${have} of ${crew.length} in the crew ${have === 1 ? "has" : "have"} it` : "Nobody in the crew has it yet",
+    ]);
+    return node;
+  };
+  const next = mine ? nextBadges(badges) : [];
   return h("section", { class: "section" },
-    h("div", { class: "section-head" }, h("h2", null, "Badges"), h("small", null, `${badges.filter((b) => b.got).length}/${badges.length}`)),
-    h("div", { class: "badges" }, badges.map((b) => h("div", { class: `badge ${b.got ? "got" : "locked"}`, title: b.detail }, h("b", { "aria-hidden": "true" }, b.icon), h("strong", null, b.name), h("small", null, b.detail)))));
+    h("div", { class: "section-head" }, h("h2", null, "Badges"), h("small", null, `${badges.filter((x) => x.got).length} of ${badges.length}`)),
+    next.length ? h("div", { class: "card next-badges" },
+      h("span", { class: "label" }, "Next up"),
+      next.map((badge) => h("div", { class: "next-badge" },
+        h("b", { "aria-hidden": "true" }, badge.icon),
+        h("div", null, h("strong", null, badge.name), h("small", null, `${badge.detail} · ${badgeToGo(badge)}`),
+          h("span", { class: "badge-bar", "aria-hidden": "true" }, h("span", { style: { width: `${Math.max(4, badge.ratio * 100)}%` } })))))) : null,
+    BADGE_GROUPS.map(([key, label, note]) => {
+      const group = badges.filter((x) => x.group === key);
+      return h("div", { class: "badge-group" },
+        h("div", { class: "badge-group-head" }, h("h3", null, label), h("small", null, `${group.filter((x) => x.got).length}/${group.length}`)),
+        note ? h("p", { class: "small muted" }, note) : null,
+        h("div", { class: "badges" }, group.map(tile)));
+    }));
+}
+
+/** New badges since this device last looked: one cheer for them. The first time, just say how many are waiting. */
+function announceBadges() {
+  const facts = state.badgeFacts.get(state.user.id);
+  if (!facts) return;
+  const key = `lockedin.badges.${state.user.id}`;
+  const earned = badgesFor(facts).filter((badge) => badge.got);
+  let seen = null;
+  try { seen = JSON.parse(readStored(key) || "null"); } catch (_) {}
+  store(key, JSON.stringify(earned.map((badge) => badge.id)));
+  if (!Array.isArray(seen)) {
+    if (earned.length) toast(`🏅 You've unlocked ${earned.length} ${earned.length === 1 ? "badge" : "badges"} already. See them in Me.`, { ms: 6000 });
+    return;
+  }
+  const fresh = earned.filter((badge) => !seen.includes(badge.id));
+  if (!fresh.length) return;
+  confetti(["🏅", ...fresh.map((badge) => badge.icon), "✨"]);
+  toast(fresh.length === 1 ? `🏅 New badge: ${fresh[0].icon} ${fresh[0].name}!` : `🏅 ${fresh.length} new badges: ${fresh.slice(0, 3).map((badge) => `${badge.icon} ${badge.name}`).join(", ")}`, { ms: 7000 });
 }
 
 /** Weekly bars or the daily grid — one at a time, so a profile stays light. The choice sticks. */

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { levelFor, levelProgress, minutesForLevel, streakFrom, badgesFor, standings, chaseLine, hm, clock, untilReset, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, STILL_THERE_MS, hiddenFrom, unconfirmed } from "../game.mjs";
+import { levelFor, levelProgress, minutesForLevel, streakFrom, badgesFor, badgeProgress, nextBadges, standings, chaseLine, hm, clock, untilReset, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, STILL_THERE_MS, hiddenFrom, unconfirmed } from "../game.mjs";
 
 test("levels get steeper and the bar measures progress inside one", () => {
   assert.deepEqual([0, 149, 150, 599, 600, 2400, 12150].map(levelFor), [1, 1, 2, 2, 3, 5, 10]);
@@ -32,11 +32,22 @@ test("the board ranks the week and tells you who to catch", () => {
   assert.equal(chaseLine([ranked[0]], "b"), null);
 });
 
-test("badges come from the stats the database returns", () => {
-  const got = badgesFor(person("a", "A", 1300, { session_count: 4, longest_minutes: 200, total_minutes: 700 }), 2).filter((b) => b.got).map((b) => b.id);
-  assert.deepEqual(got, ["first", "marathon", "ten", "warrior"]);
+test("badges come from records, and say how far along you are", () => {
+  const facts = { sessions: 4, longest_sitting: 220, total_minutes: 2325, best_streak: 10, at_3am: 1, together: 14, exactly_42: 1, best_week: 1450 };
+  const badges = badgesFor(facts);
+  const got = new Set(badges.filter((badge) => badge.got).map((badge) => badge.id));
+  for (const id of ["first", "marathon", "ten", "fire", "3am", "buddy", "answer", "warrior"]) assert.ok(got.has(id), id);
+  for (const id of ["iron", "shift", "fifty", "unstoppable", "christmas", "sevens"]) assert.ok(!got.has(id), id);
+  const byId = Object.fromEntries(badges.map((badge) => [badge.id, badge]));
+  assert.equal(badgeProgress(byId.shift), "3h 40m / 8h");
+  assert.equal(badgeProgress(byId.unstoppable), "10 / 14 days");
+  assert.equal(badgeProgress(byId.ascended), "38h 45m / 1,000h");
+  assert.equal(badgeProgress(byId.christmas), null, "a once-off has no bar");
+  assert.equal(badgeProgress(byId.first), null, "an earned one has no bar");
+  // Nearest first: 38h45m of 50h, 3h40m of 5h, 10 of 14 days.
+  assert.deepEqual(nextBadges(badges).map((badge) => badge.id), ["fifty", "iron", "unstoppable"]);
+  assert.ok(badgesFor({}).every((badge) => !badge.got), "nobody starts with anything");
 });
-
 test("formatting", () => {
   assert.deepEqual([hm(0), hm(45), hm(65), hm(600)], ["0m", "45m", "1h 05m", "10h 00m"]);
   assert.equal(clock(3729000), "1:02:09");
