@@ -18,7 +18,7 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
   crew with you, nobody else. Start a crew to get an eight-character code, or
   open someone's invite link (`?join=CODE`).
 - **Your own modules.** After joining a crew you add what you study: course
-  names, codes, anything. Nothing is assumed, and only you see the list. Me →
+  names, codes, anything. Nothing is assumed. Me →
   *Your modules* shows hours this week and all time per module, and renames
   or archives them. Renaming also renames past sessions, so the hours stay
   together. A module with no time logged can be removed outright.
@@ -68,7 +68,8 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
   own is under Me. *Activity* switches between **Weekly** (hours per week for
   ten weeks, this week bright) and **Daily** (every day as a square). Tap or
   hover a bar or a square to see its total and which modules it went on.
-  Everyone's module *list* stays private.
+  *Modules* shows their time per module, this week and all time, as a share
+  of the whole; a module with no time on it stays private.
 - **The board** has three races: *Today* (resets at midnight), *This week*
   (resets Monday at midnight) and *All time*. Each shows the podium, how far
   you are from the next place, and the crew's recent sessions. It remembers

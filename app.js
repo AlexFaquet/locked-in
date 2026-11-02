@@ -327,7 +327,7 @@ function modulesStep() {
   app().replaceChildren(h("main", { class: "welcome" },
     h("div", { class: "welcome-lock", "aria-hidden": "true" }, "📚"),
     h("h1", null, "What are you studying?"),
-    h("p", null, "Add your modules — course names, codes, anything you want to time. Only you see this list, and you can change it any time."),
+    h("p", null, "Add your modules — course names, codes, anything you want to time. Your crew sees your time on each one you study, and you can change the list any time."),
     h("div", { class: "step card" },
       h("form", { onsubmit: async (ev) => {
         ev.preventDefault();
@@ -1187,7 +1187,7 @@ function modulesCard() {
         h("div", { class: "module-actions" },
           h("button", { class: "link", "aria-label": `Rename ${m.name}`, onclick: () => renameModule(m) }, "Rename"),
           h("button", { class: "link", "aria-label": `${m.total_minutes ? "Archive" : "Remove"} ${m.name}`, onclick: () => archiveModule(m, true) }, m.total_minutes ? "Archive" : "Remove"))))
-        : h("p", { class: "empty" }, "No modules yet. Add the ones you study — only you see them."),
+        : h("p", { class: "empty" }, "No modules yet. Add the ones you study. Your crew sees your time on each."),
       archived.length ? h("p", { class: "small muted", style: { marginTop: "12px" } }, "Archived: ", archived.map((m, i) => [i ? ", " : "", h("button", { class: "link", style: { padding: "0" }, title: `Bring ${m.name} back`, onclick: () => archiveModule(m, false) }, m.name)])) : null));
 }
 
@@ -1397,15 +1397,40 @@ function openProfile(userId) {
     const pending = h("div", { class: "card empty profile-pending" }, h("span", { class: "big" }, "⏳"), "Loading activity…");
     const badges = badgesSection(person);
     box.append(h("div", { class: "sheet-top" }, h("button", { class: "link", onclick: close }, "Close")), heroCard(person), pending, badges);
-    db.from("sessions").select("subject, started_at, ended_at, location")
-      .eq("user_id", userId).gte("started_at", new Date(Date.now() - 70 * 86400000).toISOString()).order("started_at", { ascending: false }).limit(400)
-      .then(({ data: sessions, error }) => {
-        if (!box.isConnected) return;
-        if (error) return pending.replaceChildren("Couldn't load their activity. Close and try again.");
-        pending.replaceWith(activityCard(person, sessions || [], "Activity"));
-        badges.after(recentSessions(sessions || [], person.name));
-      });
+    Promise.all([
+      db.from("sessions").select("subject, started_at, ended_at, location")
+        .eq("user_id", userId).gte("started_at", new Date(Date.now() - 70 * 86400000).toISOString()).order("started_at", { ascending: false }).limit(400),
+      db.rpc("crew_module_split", { p_user: userId, p_tz: TZ }),
+    ]).then(([{ data: sessions, error }, split]) => {
+      if (!box.isConnected) return;
+      if (error) return pending.replaceChildren("Couldn't load their activity. Close and try again.");
+      pending.replaceWith(activityCard(person, sessions || [], "Activity"), moduleSplit(split.data || [], person.name));
+      badges.after(recentSessions(sessions || [], person.name));
+    });
   }, { key: `profile:${userId}` });
+}
+
+/** Someone's time per module (crew_module_split): one bar for the whole split, then this week and all time for each. */
+function moduleSplit(modules, name) {
+  const total = modules.reduce((sum, m) => sum + m.total_minutes, 0);
+  // Each module in the colour its owner gave it; one that's since been renamed or removed borrows a slot.
+  const colour = (m, i) => `var(--m${m.color ?? i % 8})`;
+  const share = (m) => Math.round((m.total_minutes / total) * 100);
+  const bar = h("div", { class: "split-bar", role: "img", "aria-label": modules.map((m) => `${m.name} ${share(m)}%`).join(", ") },
+    modules.map((m, i) => {
+      const part = h("span", { style: { flexGrow: String(m.total_minutes), background: colour(m, i) } });
+      explain(part, () => [m.name, `${hm(m.total_minutes)} all time · ${share(m)}%`, `${hm(m.week_minutes)} this week`]);
+      return part;
+    }));
+  return h("section", { class: "section" },
+    h("div", { class: "section-head" }, h("h2", null, "Modules"), total ? h("small", null, `${hm(total)} all time`) : null),
+    h("div", { class: "card" }, modules.length
+      ? [bar, modules.map((m, i) => h("div", { class: "module-row" },
+        h("div", { class: "module-main" },
+          h("strong", null, h("i", { class: "module-dot", style: { background: colour(m, i) }, "aria-hidden": "true" }), h("span", null, m.name)),
+          h("small", null, `${hm(m.week_minutes)} this week · ${hm(m.total_minutes)} all time`)),
+        h("strong", { class: "split-share" }, `${share(m)}%`)))]
+      : h("p", { class: "empty" }, `${name} hasn't logged any time yet.`)));
 }
 
 /** Someone's last few sessions: module, when, how long, and where if they share it. */
@@ -1599,7 +1624,7 @@ function paintWatch(data) {
 }
 
 /** The person who shared the link: studying now or not, then their profile. */
-function watchPerson(who, { sessions }) {
+function watchPerson(who, { sessions, modules }) {
   const row = state.liveRows.get(who.user_id);
   const last = sessions[0];
   const today = `Today: ${who.today_minutes ? hm(who.today_minutes) : "nothing yet"}`;
@@ -1619,6 +1644,7 @@ function watchPerson(who, { sessions }) {
     status,
     heroCard(who),
     activityCard(who, sessions, "Activity"),
+    moduleSplit(modules || [], who.name),
     badgesSection(who),
     recentSessions(sessions, who.name, 10),
     h("p", { class: "small muted watch-note" }, `${who.name} shared this page with you. It keeps itself up to date, and ${who.name} can turn the link off at any time.`),

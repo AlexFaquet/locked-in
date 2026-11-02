@@ -1005,6 +1005,8 @@ begin
                     or (l.started_at is null and l.paused_at > now() - interval '3 hours'))),
     'feed', coalesce((select jsonb_agg(jsonb_build_object('user_id', s.user_id, 'subject', s.subject, 'started_at', s.started_at, 'ended_at', s.ended_at, 'location', s.location) order by s.ended_at desc)
                       from (select * from public.sessions s where s.user_id = any(v_people) order by s.ended_at desc limit 25) s), '[]'::jsonb),
+    -- Their time per module.
+    'modules', (select coalesce(jsonb_agg(to_jsonb(m) order by m.total_minutes desc), '[]'::jsonb) from private.module_split(v_link.user_id, p_tz) m),
     -- Badges: the owner's and their crew's (for who has what).
     'badges', (select coalesce(jsonb_agg(jsonb_build_object('user_id', b.user_id, 'facts', b.facts)), '[]'::jsonb)
                from private.badge_records(v_link.user_id, p_tz) b),
@@ -1388,3 +1390,48 @@ from public.profiles p
 cross join lateral (select f.facts from private.badge_facts(p.id) f where f.user_id = p.id) x
 join private.badge_rules r on coalesce((x.facts ->> r.fact)::numeric, 0) >= r.goal
 on conflict do nothing;
+
+/* ------------------------------------------------------------
+   Someone's time per module, this week and all time, for their
+   profile. From their sessions (which their crew can already see),
+   plus a running timer counted like the board counts it. Each
+   module keeps the colour its owner gave it, so everyone sees the
+   same colours. A module with no time on it stays private.
+   ------------------------------------------------------------ */
+
+create function private.module_split(p_user uuid, p_tz text default 'Europe/London')
+returns table (name text, color smallint, week_minutes integer, total_minutes integer)
+language sql stable security definer set search_path = ''
+as $$
+  with bounds as (select (date_trunc('week', now() at time zone p_tz)) at time zone p_tz as week_start),
+  timed as (
+    select s.subject, s.started_at, s.ended_at from public.sessions s where s.user_id = p_user
+    union all
+    select l.subject, l.started_at, least(greatest(now(), l.started_at), private.hidden_from(l.started_at, l.checked_at))
+    from public.live l where l.user_id = p_user and l.started_at is not null
+  ),
+  per as (
+    select lower(btrim(t.subject)) as key,
+           (array_agg(btrim(t.subject) order by t.ended_at desc))[1] as latest_name,
+           round(sum(extract(epoch from least(t.ended_at, now()) - greatest(t.started_at, b.week_start))) filter (where t.ended_at > b.week_start) / 60) as week,
+           round(sum(extract(epoch from t.ended_at - t.started_at)) / 60) as total
+    from timed t cross join bounds b
+    group by 1
+  )
+  select coalesce(m.name, p.latest_name), m.color, coalesce(p.week, 0)::integer, coalesce(p.total, 0)::integer
+  from per p
+  left join public.subjects m on m.user_id = p_user and lower(m.name) = p.key
+  where p.total > 0
+  order by p.total desc
+$$;
+revoke execute on function private.module_split(uuid, text) from public, anon, authenticated;
+
+-- For the app: a crewmate's split (or your own); nobody else's.
+create function public.crew_module_split(p_user uuid, p_tz text default 'Europe/London')
+returns table (name text, color smallint, week_minutes integer, total_minutes integer)
+language sql stable security definer set search_path = ''
+as $$
+  select * from private.module_split(p_user, p_tz) where private.shares_crew(p_user)
+$$;
+revoke execute on function public.crew_module_split(uuid, text) from public, anon;
+grant execute on function public.crew_module_split(uuid, text) to authenticated;

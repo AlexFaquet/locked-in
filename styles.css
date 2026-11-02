@@ -461,3 +461,9 @@ html.chatting .app { padding-bottom: max(calc(186px + env(safe-area-inset-bottom
 .chat-news strong { font-weight: 800; }
 .chat-news small { display: block; color: var(--ink-2); font-weight: 700; font-size: 13px; }
 .chat-news time { display: block; margin-top: 2px; font-size: 11px; font-weight: 700; color: var(--muted); }
+
+/* Someone's split across modules: one bar, a 2px gap between parts, rounded ends. */
+.split-bar { display: flex; gap: 2px; height: 14px; margin: 4px 0 6px; border-radius: 7px; overflow: hidden; background: var(--card); }
+.split-bar > span { min-width: 4px; flex-basis: 0; cursor: pointer; }
+.split-share { font: 600 17px var(--display); color: var(--ink-2); }
+.split-bar + .module-row { border-top: 0; }
