@@ -6,7 +6,7 @@
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/+esm";
 import { SUPABASE_URL, SUPABASE_KEY, MUSIC } from "./config.js";
-import { levelProgress, streakFrom, badgesFor, badgeProgress, addsUp, nextBadges, listNames, studyGroups, pingLines, BADGES, BADGE_GROUPS, standings, chaseLine, hm, clock, untilReset, ago, TZ, ukDay, ukAt, dayStart, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, hiddenFrom, longStretch, unconfirmed } from "./game.mjs";
+import { levelProgress, ranksFor, streakFrom, badgesFor, badgeProgress, addsUp, nextBadges, listNames, studyGroups, pingLines, BADGES, BADGE_GROUPS, standings, chaseLine, hm, clock, untilReset, ago, TZ, ukDay, ukAt, dayStart, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, hiddenFrom, longStretch, unconfirmed } from "./game.mjs";
 
 const db = createClient(SUPABASE_URL, SUPABASE_KEY);
 const EMOJI = ["📚", "🦊", "🐼", "🐸", "🦉", "🐯", "🐙", "🦄", "🐧", "🐨", "🦁", "🐵", "🐳", "🌵", "🍄", "⚡️", "🚀", "🎧", "☕️", "🧠"];
@@ -936,7 +936,7 @@ function render() {
       h("div", { class: "brand" }, h("span", { class: "brand-lock", "aria-hidden": "true" }, "🔒"), "Locked In"),
       h("div", { class: "top-stats" },
         h("span", { class: "pill pill-flame", title: "Days in a row with 30+ minutes" }, "🔥 ", String(streak)),
-        h("span", { class: "pill pill-level", title: level.title }, "Lv ", String(level.level)))),
+        h("button", { type: "button", class: "pill pill-level", title: level.title, "aria-label": `Level ${level.level}, ${level.title}. See all ranks`, onclick: () => ranksSheet({ ...EMPTY_STATS, ...me, user_id: state.user.id }) }, "Lv ", String(level.level)))),
     h("main", null, (views[state.tab] || nowView)()),
     h("nav", { class: "tabs", "aria-label": "Sections" }, tab("now", "⏱️", "Now"), tab("board", "🏆", "Board"), tab("chat", "💬", "Chat"), tab("me", state.me.emoji, "Me")));
   tick();
@@ -1394,7 +1394,7 @@ function heroCard(person) {
   return h("section", { class: "card hero" },
     h("span", { class: `avatar avatar-big${person.live_started_at ? " is-live" : ""}` }, person.emoji),
     h("h2", null, person.name),
-    h("p", { class: "hero-title" }, `Level ${level.level} · ${level.title}`),
+    h("button", { type: "button", class: "hero-title", "aria-label": `Level ${level.level}, ${level.title}. See all ranks`, onclick: () => ranksSheet(person) }, `Level ${level.level} · ${level.title}`, h("span", { "aria-hidden": "true" }, " ›")),
     person.live_started_at ? h("p", { class: "hero-live" }, "🔒 Locked in on ", h("b", null, person.live_subject), person.live_location ? ` at ${person.live_location}` : "") : null,
     h("div", { class: "xp" },
       h("div", { class: "xp-top" }, h("span", null, `${Math.round(person.total_minutes)} XP`), h("span", null, `${hm(level.toNext)} to Level ${level.level + 1}`)),
@@ -1403,6 +1403,45 @@ function heroCard(person) {
       h("div", null, h("strong", null, hm(person.week_minutes)), h("span", null, rank && state.people.length > 1 ? `This week · #${rank}` : "This week")),
       h("div", null, h("strong", null, `🔥 ${streak}`), h("span", null, "Day streak")),
       h("div", null, h("strong", null, hm(person.total_minutes)), h("span", null, "All time"))));
+}
+
+/** Every rank, the top one first, and how far up someone has climbed. It opens on where they are now. */
+function ranksSheet(person) {
+  hideTip();
+  const you = person.user_id === state.user.id && !state.watching;
+  const level = levelProgress(person.total_minutes);
+  const ranks = ranksFor(person.total_minutes);
+  const top = ranks.at(-1);
+  const next = ranks.find((rank) => rank.status === "ahead");
+  let here = null;
+  const row = (rank) => {
+    const at = rank.minutes ? `${(rank.minutes / 60).toLocaleString("en-GB")}h` : null;
+    const current = rank.status === "current";
+    const node = h("li", { class: `rung is-${rank.status}`, "aria-current": current ? "step" : null },
+      h("span", { class: "rung-icon", "aria-hidden": "true" }, h("span", null, rank.icon)),
+      h("div", null,
+        current ? h("span", { class: "label rung-here" }, you ? "You're here" : `${person.name} is here`) : null,
+        h("strong", null, `Level ${current ? level.level : rank.level} · ${rank.title}`),
+        h("small", null, current
+          ? `${hm(level.toNext)} to ${next ? next.title : `Level ${level.level + 1}`}`
+          : [rank === top ? "The top" : null, at, rank.status === "passed" ? "Reached ✓" : `${hm(rank.left)} to go`].filter(Boolean).join(" · ")),
+        current ? h("div", { class: "xp-bar", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(Math.round(level.ratio * 100)) }, h("span", { style: { width: `${Math.max(2, level.ratio * 100)}%` } })) : null));
+    if (current) here = node;
+    return node;
+  };
+  const summary = top.status === "current"
+    ? `${you ? "You've" : `${person.name} has`} reached the top ${top.icon}`
+    : `${you ? "You're" : `${person.name} is`} ${hm(top.left)} away from ${top.title} ${top.icon}`;
+  let inner = null;
+  sheet((box, close) => {
+    inner = box;
+    box.append(
+      h("div", { class: "sheet-top" }, h("button", { class: "link", onclick: close }, "Close")),
+      h("h2", null, "Ranks"),
+      h("p", { class: "muted", style: { marginTop: "6px" } }, summary),
+      h("ol", { class: "ladder", reversed: true }, [...ranks].reverse().map(row)));
+  }, { key: "ranks" });
+  if (inner && here) inner.scrollTop += here.getBoundingClientRect().top - inner.getBoundingClientRect().top - (inner.clientHeight - here.offsetHeight) / 2;
 }
 
 /** What's left for a badge: "1h 20m to go", "4 more days". */

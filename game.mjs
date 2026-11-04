@@ -5,8 +5,18 @@
 export const levelFor = (minutes) => Math.floor(Math.sqrt(Math.max(0, minutes) / 60 / 2.5)) + 1;
 export const minutesForLevel = (level) => Math.round(2.5 * (level - 1) ** 2 * 60);
 
-const TITLES = ["Fresh Starter", "Note Taker", "Library Regular", "Focus Apprentice", "Deep Worker", "Study Machine", "Exam Slayer", "Scholar", "Grandmaster", "Legend"];
-export const titleFor = (level) => TITLES[Math.min(level, TITLES.length) - 1];
+/* The ranks, lowest first. Levels carry on past the last one, under the same name. */
+export const RANKS = [
+  ["🌱", "Fresh Starter"], ["📝", "Note Taker"], ["📚", "Library Regular"], ["🎯", "Focus Apprentice"], ["⛏️", "Deep Worker"],
+  ["⚙️", "Study Machine"], ["🗡️", "Exam Slayer"], ["🎓", "Scholar"], ["♟️", "Grandmaster"], ["👑", "Legend"],
+].map(([icon, title], i) => ({ level: i + 1, icon, title, minutes: minutesForLevel(i + 1) }));
+export const titleFor = (level) => RANKS[Math.min(level, RANKS.length) - 1].title;
+
+/** The whole ladder against someone's time: the ranks they've passed, the one they're on, and how far off the rest are. */
+export function ranksFor(minutes) {
+  const on = Math.min(levelFor(minutes), RANKS.length);
+  return RANKS.map((rank) => ({ ...rank, status: rank.level < on ? "passed" : rank.level === on ? "current" : "ahead", left: Math.max(0, rank.minutes - minutes) }));
+}
 
 /** Where you are inside your current level, for the XP bar. */
 export function levelProgress(minutes) {

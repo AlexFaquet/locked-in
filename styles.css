@@ -120,7 +120,9 @@ p { margin: 0; }
 .top-stats { display: flex; gap: 8px; }
 .pill { display: inline-flex; align-items: center; gap: 5px; padding: 6px 11px; border-radius: 999px; background: var(--card); border: 2px solid var(--line); font: 600 15px var(--display); }
 .pill-flame { color: var(--flame); }
-.pill-level { color: var(--primary); }
+.pill-level { position: relative; color: var(--primary); cursor: pointer; }
+/* The pill is small; the tap target doesn't have to be. */
+.pill-level::after { content: ''; position: absolute; inset: -6px -4px; }
 
 /* ---------- avatar ---------- */
 .avatar { position: relative; display: inline-grid; place-items: center; flex: none; width: 52px; height: 52px; border-radius: 50%; background: var(--sunk); border: 2px solid var(--line); font-size: 28px; }
@@ -245,7 +247,25 @@ p { margin: 0; }
 /* ---------- me ---------- */
 .hero { text-align: center; padding: 26px 20px 22px; }
 .hero h2 { font-size: 28px; margin-top: 10px; }
-.hero-title { color: var(--primary); font: 600 17px var(--display); }
+.hero-title { display: inline-flex; align-items: center; gap: 5px; min-height: 44px; margin-top: 6px; padding: 6px 16px; border: 0; border-radius: 999px; background: var(--primary-soft); color: var(--primary); font: 600 17px var(--display); cursor: pointer; }
+/* The ranks: a ladder, the top first. Its rail is gold as far up as someone has climbed. */
+.ladder { list-style: none; margin: 16px 0 0; padding: 0; }
+.rung { position: relative; display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 14px; align-items: center; padding: 10px; border-radius: 18px; }
+.rung::before, .rung::after { content: ''; position: absolute; left: 32px; width: 4px; height: 50%; background: var(--line); }
+.rung::before { top: 0; }
+.rung::after { bottom: 0; }
+.rung:first-child::before, .rung:last-child::after { display: none; }
+.rung.is-passed::before, .rung.is-passed::after, .rung.is-current::after { background: var(--gold); }
+.rung-icon { position: relative; z-index: 1; display: grid; place-items: center; width: 48px; height: 48px; border-radius: 50%; border: 2px solid var(--line); background: var(--sunk); font-size: 24px; }
+.is-passed .rung-icon { border-color: var(--gold); }
+.is-ahead .rung-icon span { filter: grayscale(1); opacity: .55; }
+.rung.is-current { background: var(--primary-soft); }
+.is-current .rung-icon { border-color: var(--primary); background: var(--card); }
+.rung strong { display: block; font: 600 16px var(--display); overflow-wrap: anywhere; }
+.rung small { color: var(--muted); font-weight: 700; font-size: 13px; }
+.is-ahead strong { color: var(--ink-2); }
+.rung-here { margin-bottom: 2px; color: var(--primary); }
+.rung .xp-bar { height: 12px; margin-top: 6px; }
 .xp { margin-top: 18px; text-align: left; }
 .xp-top { display: flex; justify-content: space-between; font-weight: 800; font-size: 14px; color: var(--muted); margin-bottom: 6px; }
 .xp-bar { height: 18px; border-radius: 10px; background: var(--sunk); border: 2px solid var(--line); overflow: hidden; }

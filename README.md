@@ -55,7 +55,8 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
   until you tap *Got it*, including ones sent while the app was in the
   background or closed.
 - **Earn XP** — a point a minute. Levels get steeper (Level 2 at 2.5 hours,
-  Level 5 at 40, Level 10 at 202.5). Streaks count days with 30+ minutes.
+  Level 5 at 40, Level 10 at 202.5). Tap a rank on any profile to see the
+  whole ladder and how far up it someone is. Streaks count days with 30+ minutes.
 - **Badges** — 41 of them, in eight groups: the grind (3, 5, 8 and 12 hours
   in one sitting, where a module switch doesn't break it), big days and
   weeks, hour milestones up to 1,000, streaks, odd hours (3am Club, Dawn

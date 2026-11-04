@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { levelFor, levelProgress, minutesForLevel, streakFrom, badgesFor, badgeProgress, addsUp, nextBadges, listNames, studyGroups, pingLines, ON_THE_WAY_MS, standings, chaseLine, hm, clock, untilReset, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, STILL_THERE_MS, hiddenFrom, longStretch, unconfirmed } from "../game.mjs";
+import { levelFor, levelProgress, minutesForLevel, RANKS, ranksFor, titleFor, streakFrom, badgesFor, badgeProgress, addsUp, nextBadges, listNames, studyGroups, pingLines, ON_THE_WAY_MS, standings, chaseLine, hm, clock, untilReset, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, STILL_THERE_MS, hiddenFrom, longStretch, unconfirmed } from "../game.mjs";
 
 test("levels get steeper and the bar measures progress inside one", () => {
   assert.deepEqual([0, 149, 150, 599, 600, 2400, 12150].map(levelFor), [1, 1, 2, 2, 3, 5, 10]);
@@ -156,4 +156,20 @@ test("waiting pings become one line per person, and 'I'm coming' goes stale", ()
   assert.deepEqual(lines.map((line) => [line.from_user, line.kind, line.count]), [["a", "cheer", 2], ["b", "cheer", 1], ["a", "joining", 1], ["c", "cheer", 1]]);
   assert.equal(lines[0].last, at(2));
   assert.deepEqual(pingLines([], now), []);
+});
+
+test("the ladder shows the ranks passed, the one you're on, and how far off the rest are", () => {
+  assert.deepEqual(RANKS.map((rank) => rank.minutes), [0, 150, 600, 1350, 2400, 3750, 5400, 7350, 9600, 12150]);
+  assert.ok(RANKS.every((rank) => titleFor(rank.level) === rank.title && levelFor(rank.minutes) === rank.level));
+  const statuses = (minutes) => ranksFor(minutes).map((rank) => rank.status[0]).join("");
+  assert.equal(statuses(0), "caaaaaaaaa", "everyone starts on the first");
+  assert.equal(statuses(149), "caaaaaaaaa");
+  assert.equal(statuses(150), "pcaaaaaaaa", "reaching a rank's exact time puts you on it");
+  assert.equal(statuses(3141), "ppppcaaaaa");
+  assert.equal(statuses(12150), "pppppppppc", "the top");
+  assert.equal(statuses(99999), "pppppppppc", "levels carry on, the ladder stops at the top");
+  const ladder = ranksFor(3141);
+  assert.equal(ladder[5].left, 609, "Study Machine is 10h 09m off");
+  assert.equal(ladder[9].left, 9009, "Legend is 150h 09m off");
+  assert.equal(ladder[0].left, 0, "nothing left on a rank already passed");
 });
