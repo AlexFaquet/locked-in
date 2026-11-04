@@ -60,7 +60,8 @@ export function streakFrom(days = {}, now = new Date(), minimum = 30) {
 }
 
 /* Badges. Each comes from one of someone's records (private.badge_facts:
-   their longest sitting, best day, best streak…), so once earned it's kept.
+   their longest sitting, best day, best streak…), best-ever, so a bad week
+   doesn't cost you one, but correcting a session can.
    `key` is the record and `goal` what it takes; `unit` says how to show the
    progress. A secret one shows as ??? until someone has it. */
 export const BADGE_GROUPS = [
@@ -126,7 +127,8 @@ export const BADGES = [
 ];
 
 /** Every badge against someone's records: earned or not, and how far along. `facts.earned` is what the
-    database has recorded, which stays earned even if a session behind it is later deleted. */
+    database has recorded. It withdraws a badge when a corrected session no longer supports it, but keeps
+    crew badges, whose records can shrink just because someone left the crew. */
 export const badgesFor = (facts = {}) => BADGES.map((badge) => {
   const value = Number(facts[badge.key]) || 0;
   const got = value >= badge.goal || (facts.earned || []).includes(badge.id);
@@ -236,6 +238,9 @@ export const STILL_THERE_MS = 3 * 3600000;
 /** When a running timer goes unconfirmed: 3 hours after its stretch started or its owner last said "still here". Null if nothing's running. */
 export const hiddenFrom = (row) =>
   row?.started_at ? Math.max(+new Date(row.started_at), row.checked_at ? +new Date(row.checked_at) : 0) + STILL_THERE_MS : null;
+
+/** A stretch long enough to look twice before saving it: a forgotten timer is how false records and badges happen. */
+export const longStretch = (row, now = Date.now()) => Boolean(row?.started_at) && now - +new Date(row.started_at) >= STILL_THERE_MS;
 
 /** A running timer that's waiting for its owner to say they're still there. */
 export const unconfirmed = (row, now = Date.now()) => {

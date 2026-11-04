@@ -6,7 +6,7 @@
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/+esm";
 import { SUPABASE_URL, SUPABASE_KEY, MUSIC } from "./config.js";
-import { levelProgress, streakFrom, badgesFor, badgeProgress, nextBadges, BADGES, BADGE_GROUPS, standings, chaseLine, hm, clock, untilReset, ago, TZ, ukDay, ukAt, dayStart, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, hiddenFrom, unconfirmed } from "./game.mjs";
+import { levelProgress, streakFrom, badgesFor, badgeProgress, nextBadges, BADGES, BADGE_GROUPS, standings, chaseLine, hm, clock, untilReset, ago, TZ, ukDay, ukAt, dayStart, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, hiddenFrom, longStretch, unconfirmed } from "./game.mjs";
 
 const db = createClient(SUPABASE_URL, SUPABASE_KEY);
 const EMOJI = ["📚", "🦊", "🐼", "🐸", "🦉", "🐯", "🐙", "🦄", "🐧", "🐨", "🦁", "🐵", "🐳", "🌵", "🍄", "⚡️", "🚀", "🎧", "☕️", "🧠"];
@@ -487,6 +487,7 @@ function subscribe() {
     .on("postgres_changes", { event: "UPDATE", schema: "public", table: "profiles" }, refreshSoon)
     // RLS lets through only your crews' messages. A delete arrives as just an id, for whoever's listening.
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, ({ new: message }) => gotMessage(message))
+    .on("postgres_changes", { event: "UPDATE", schema: "public", table: "messages" }, ({ new: message }) => changedMessage(message))
     .on("postgres_changes", { event: "DELETE", schema: "public", table: "messages" }, ({ old }) => lostMessage(old?.id))
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "pings", filter: `to_user=eq.${state.user.id}` }, ({ new: ping }) => {
       const who = byId(ping.from_user);
@@ -618,11 +619,24 @@ async function celebrate(subject, minutes, levelBefore) {
   else { if (minutes >= 25) confetti(); toast(`+${Math.round(minutes)} XP · ${hm(minutes)} ${subject ? `on ${subject}` : "this session"} 💪`); }
 }
 
-/** Stops the timer. Under a minute isn't kept; past 16 hours we ask when you really stopped. */
-async function finish({ discard = false, end = new Date() } = {}) {
+/** Before saving 3+ hours in one go, look twice: a forgotten timer is how false records and badges happen. */
+function askIfAllOfIt(live, carryOn) {
+  sheet((box, close) => box.append(
+    h("h2", null, "All of it? 🤔"),
+    h("p", { class: "muted", style: { marginTop: "6px" } }, `That's ${hm(minutesBetween(live.started_at, new Date()))} in one go, since ${timeOf(live.started_at)}. Were you studying the whole time?`),
+    h("div", { class: "btn-row" },
+      h("button", { class: "btn btn-soft", onclick: () => { close(); editTimerSheet(); } }, "No, I stopped earlier"),
+      h("button", { class: "btn", onclick: () => { close(); carryOn(); } }, "Yes, all of it"))), { key: "all-of-it" });
+}
+
+/** Stops the timer. Under a minute isn't kept; a long stretch gets a second look; past 16 hours we ask when you really stopped. */
+async function finish({ discard = false, end: typed = null, reviewed = false } = {}) {
   const live = state.live;
   if (!live) return;
+  const end = typed || new Date();
   if (!discard && +end - +new Date(live.started_at) > MAX_SESSION_MS) return askWhenStopped();
+  // A time someone typed has had its look already.
+  if (!discard && !typed && !reviewed && longStretch(live)) return askIfAllOfIt(live, () => finish({ reviewed: true }));
   // Stretches before a break are saved already, so XP counts from the sitting's start.
   const banked = (live.banked_seconds || 0) / 60;
   const levelBefore = levelProgress((byId(state.user.id)?.total_minutes || 0) - banked).level;
@@ -640,11 +654,12 @@ async function finish({ discard = false, end = new Date() } = {}) {
 }
 
 /** Takes a break: the stretch so far is saved, and the sitting waits for Resume. */
-async function pause() {
+async function pause(reviewed = false) {
   const live = state.live;
   if (!live) return;
   const end = new Date();
   if (+end - +new Date(live.started_at) > MAX_SESSION_MS) return askWhenStopped();
+  if (!reviewed && longStretch(live)) return askIfAllOfIt(live, () => pause(true));
   const saved = await saveStretch(live, end);
   if (saved === null) return;
   const row = { session_id: null, subject: null, started_at: null, paused_at: end.toISOString(), paused_subject: live.subject, banked_seconds: (live.banked_seconds || 0) + Math.round(saved / 1000) };
@@ -662,12 +677,13 @@ async function pause() {
  * you were on, and a new stretch starts on the new one in the same sitting,
  * so the clock and the XP carry on.
  */
-async function switchModule(name) {
+async function switchModule(name, reviewed = false) {
   const live = state.live;
   if (!live || name === live.subject) return;
   const now = new Date();
   const length = +now - +new Date(live.started_at);
   if (length > MAX_SESSION_MS) return askWhenStopped();
+  if (!reviewed && longStretch(live)) return askIfAllOfIt(live, () => switchModule(name, true));
   const fresh = length < MIN_SESSION_MS;
   // Under a minute in, it was the wrong button: relabel the stretch instead of saving a scrap.
   const saved = fresh ? 0 : await saveStretch(live, now);
@@ -995,6 +1011,15 @@ function gotMessage(m) {
     const crew = state.crews.find((c) => c.id === m.crew_id);
     try { new Notification(`${who?.emoji || "💬"} ${who?.name || "Someone"} · ${crew?.name || "your crew"}`, { body: messageText(m), icon: "icon-180.png", tag: `chat:${m.crew_id}` }); } catch (_) {}
   }
+  keepFocus(render);
+}
+
+/** A badge card that lost a badge because a session was corrected. */
+function changedMessage(m) {
+  if (!m?.id) return;
+  const swap = (list) => list.map((x) => (x.id === m.id ? { ...x, ...m } : x));
+  state.chat.messages = swap(state.chat.messages);
+  state.recent = swap(state.recent);
   keepFocus(render);
 }
 

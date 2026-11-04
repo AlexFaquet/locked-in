@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { levelFor, levelProgress, minutesForLevel, streakFrom, badgesFor, badgeProgress, nextBadges, standings, chaseLine, hm, clock, untilReset, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, STILL_THERE_MS, hiddenFrom, unconfirmed } from "../game.mjs";
+import { levelFor, levelProgress, minutesForLevel, streakFrom, badgesFor, badgeProgress, nextBadges, standings, chaseLine, hm, clock, untilReset, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, STILL_THERE_MS, hiddenFrom, longStretch, unconfirmed } from "../game.mjs";
 
 test("levels get steeper and the bar measures progress inside one", () => {
   assert.deepEqual([0, 149, 150, 599, 600, 2400, 12150].map(levelFor), [1, 1, 2, 2, 3, 5, 10]);
@@ -111,4 +111,14 @@ test("a timer untouched for 3 hours asks if you're still there", () => {
   // Nothing running, nothing to ask.
   assert.equal(hiddenFrom({ started_at: null, paused_at: "2026-10-27T14:00:00Z" }), null);
   assert.equal(unconfirmed(null), false);
+});
+
+test("a stretch of 3 hours or more gets a second look, even after saying still here", () => {
+  const start = Date.parse("2026-11-04T09:00:00Z");
+  const row = { started_at: "2026-11-04T09:00:00Z", checked_at: "2026-11-04T11:59:00Z" };
+  assert.equal(longStretch(row, start + STILL_THERE_MS - 1000), false);
+  assert.equal(longStretch(row, start + STILL_THERE_MS), true);
+  assert.equal(unconfirmed(row, start + STILL_THERE_MS), false, "confirmed just now, and still worth asking");
+  assert.equal(longStretch(null), false);
+  assert.equal(longStretch({ started_at: null, paused_at: "2026-11-04T09:00:00Z" }), false);
 });

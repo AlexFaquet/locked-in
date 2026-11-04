@@ -1056,8 +1056,8 @@ alter publication supabase_realtime add table public.messages;
 /* ------------------------------------------------------------
    Badges: everyone's records, worked out from all their saved
    sessions (and their hypes and crew boards), for the app to turn
-   into badges (BADGES in game.mjs). Records, not "right now", so a
-   badge once earned is kept. Back-to-back sessions (a module switch
+   into badges (BADGES in game.mjs). Best-ever records, so a bad week
+   doesn't cost you a badge. Back-to-back sessions (a module switch
    saves one and starts the next at the same moment) count as one
    sitting; a pause ends it. All days and hours are St Andrews time.
    ------------------------------------------------------------ */
@@ -1215,7 +1215,9 @@ revoke execute on function private.badge_facts(uuid, text) from public, anon, au
 create table private.badge_rules (
   id text primary key,
   fact text not null,
-  goal integer not null check (goal > 0)
+  goal integer not null check (goal > 0),
+  -- Kept even if the record drops: a crew badge's can shrink just because someone left.
+  lasting boolean not null default false
 );
 insert into private.badge_rules (id, fact, goal) values
   ('marathon', 'longest_sitting', 180),
@@ -1260,7 +1262,11 @@ insert into private.badge_rules (id, fact, goal) values
   ('answer', 'exactly_42', 1),
   ('sevens', 'exactly_77', 1);
 
--- Who has earned what, and when. Kept even if a session behind it is later deleted.
+update private.badge_rules set lasting = true where id in ('buddy', 'party', 'house', 'champion', 'dynasty', 'hype', 'fan');
+
+-- Who holds what, and since when. A badge a corrected session no longer supports is
+-- withdrawn with its chat card (see award_badges). Withdrawing went in by hand in the
+-- SQL editor on 4 November 2026, so it isn't in migration history.
 create table private.earned_badges (
   user_id uuid not null references public.profiles (id) on delete cascade,
   badge text not null references private.badge_rules (id),
@@ -1292,22 +1298,41 @@ $$;
 revoke execute on function public.crew_badges(text) from public, anon;
 grant execute on function public.crew_badges(text) to authenticated;
 
--- Records anything newly earned and tells each of the earner's crews, once.
+-- Withdraws what the records no longer support, then records and announces what's new.
 create function private.award_badges(p_user uuid)
 returns void
 language plpgsql security definer set search_path = ''
 as $$
 declare
+  v_facts jsonb;
+  v_gone text[];
   v_new text[];
 begin
-  with facts as (select f.facts from private.badge_facts(p_user) f where f.user_id = p_user),
-  earned as (
-    select r.id from private.badge_rules r cross join facts
-    where coalesce((facts.facts ->> r.fact)::numeric, 0) >= r.goal
-  ),
-  added as (
+  -- Their account is being deleted, and its sessions with it.
+  if not exists (select 1 from public.profiles p where p.id = p_user) then return; end if;
+  select f.facts into v_facts from private.badge_facts(p_user) f where f.user_id = p_user;
+
+  -- Withdrawn: what a corrected session no longer supports, and its news in the chat.
+  with gone as (
+    delete from private.earned_badges e
+    using private.badge_rules r
+    where e.user_id = p_user and r.id = e.badge and not r.lasting
+      and coalesce((v_facts ->> r.fact)::numeric, 0) < r.goal
+    returning e.badge
+  )
+  select array_agg(gone.badge) into v_gone from gone;
+  if v_gone is not null then
+    delete from public.messages m where m.user_id = p_user and m.badges <@ v_gone;
+    update public.messages m
+    set badges = (select array_agg(b) from unnest(m.badges) as b where b <> all (v_gone))
+    where m.user_id = p_user and m.badges && v_gone;
+  end if;
+
+  -- Newly earned: recorded, and told to each of their crews once.
+  with added as (
     insert into private.earned_badges (user_id, badge)
-    select p_user, e.id from earned e
+    select p_user, r.id from private.badge_rules r
+    where coalesce((v_facts ->> r.fact)::numeric, 0) >= r.goal
     on conflict do nothing
     returning badge
   )
@@ -1319,7 +1344,7 @@ begin
 end $$;
 revoke execute on function private.award_badges(uuid) from public, anon, authenticated;
 
--- After sessions are saved or changed (a whole sync at once), and after a hype.
+-- After sessions are saved, changed or deleted (a whole sync at once), and after a hype.
 -- Badges must never stop a session saving, so a failure here is only logged.
 create function private.award_for_rows()
 returns trigger
@@ -1342,6 +1367,9 @@ create trigger sessions_award_on_insert after insert on public.sessions
   referencing new table as changed for each statement execute function private.award_for_rows();
 create trigger sessions_award_on_update after update on public.sessions
   referencing new table as changed for each statement execute function private.award_for_rows();
+
+create trigger sessions_award_on_delete after delete on public.sessions
+  referencing old table as changed for each statement execute function private.award_for_rows();
 
 create function private.award_for_ping()
 returns trigger

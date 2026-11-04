@@ -54,8 +54,11 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
   weeks, hour milestones up to 1,000, streaks, odd hours (3am Club, Dawn
   Patrol, Midnight Oil…), days that count (Halloween, Christmas…), crew ones
   (studying alongside each other, winning the week, hype) and two secrets.
-  They come from your records (`private.badge_facts`), so once earned
-  they're kept. Locked ones show how far along you are, *Next up* shows the
+  They come from your best-ever records (`private.badge_facts`), so a bad
+  week doesn't cost you one, but correcting a session can: a forgotten timer
+  shouldn't earn anything. Crew badges stay, as their records can shrink when
+  someone leaves. Before saving 3+ hours in one go, the app asks *All of it?*
+  Locked ones show how far along you are, *Next up* shows the
   three you're closest to, tapping one says who in the crew has it, and a
   new one gets confetti. The database records each badge when it's earned
   (after a session's saved or changed, after a hype, and for everyone each

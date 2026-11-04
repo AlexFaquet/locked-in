@@ -13,9 +13,18 @@ test("the database's badge rules match the app's badges", () => {
   assert.deepEqual(rules, BADGES.map((badge) => ({ id: badge.id, fact: badge.key, goal: badge.goal })));
 });
 
-test("a badge the database recorded stays earned", () => {
-  const shift = (facts) => badgesFor(facts).find((badge) => badge.id === "shift");
-  assert.equal(shift({ longest_sitting: 200 }).got, false);
-  assert.equal(shift({ longest_sitting: 200, earned: ["shift"] }).got, true, "the 8-hour session was deleted, the badge wasn't");
-  assert.equal(shift({ longest_sitting: 200, earned: ["shift"] }).ratio, 1);
+test("a badge the database still holds counts as earned", () => {
+  const buddy = (facts) => badgesFor(facts).find((badge) => badge.id === "buddy");
+  assert.equal(buddy({ together: 4 }).got, false);
+  assert.equal(buddy({ together: 4, earned: ["buddy"] }).got, true, "the crewmate behind it left; the badge stays");
+  assert.equal(buddy({ together: 4, earned: ["buddy"] }).ratio, 1);
+});
+
+// A corrected session should cost someone a badge it no longer supports, but a crewmate leaving shouldn't.
+test("only crew badges outlast the records behind them", () => {
+  const schema = readFileSync(new URL("../supabase/schema.sql", import.meta.url), "utf8");
+  const block = schema.match(/update private\.badge_rules set lasting = true where id in \(([^)]*)\)/);
+  assert.ok(block, "lasting badges in schema.sql");
+  const lasting = [...block[1].matchAll(/'([^']+)'/g)].map(([, id]) => id).sort();
+  assert.deepEqual(lasting, BADGES.filter((badge) => badge.group === "crew").map((badge) => badge.id).sort());
 });
