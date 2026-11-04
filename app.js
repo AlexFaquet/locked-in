@@ -6,7 +6,7 @@
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/+esm";
 import { SUPABASE_URL, SUPABASE_KEY, MUSIC } from "./config.js";
-import { levelProgress, streakFrom, badgesFor, badgeProgress, nextBadges, BADGES, BADGE_GROUPS, standings, chaseLine, hm, clock, untilReset, ago, TZ, ukDay, ukAt, dayStart, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, hiddenFrom, longStretch, unconfirmed } from "./game.mjs";
+import { levelProgress, streakFrom, badgesFor, badgeProgress, addsUp, nextBadges, listNames, studyGroups, pingLines, BADGES, BADGE_GROUPS, standings, chaseLine, hm, clock, untilReset, ago, TZ, ukDay, ukAt, dayStart, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, hiddenFrom, longStretch, unconfirmed } from "./game.mjs";
 
 const db = createClient(SUPABASE_URL, SUPABASE_KEY);
 const EMOJI = ["📚", "🦊", "🐼", "🐸", "🦉", "🐯", "🐙", "🦄", "🐧", "🐨", "🦁", "🐵", "🐳", "🌵", "🍄", "⚡️", "🚀", "🎧", "☕️", "🧠"];
@@ -32,6 +32,8 @@ const state = {
   recent: [], chat: { crew: null, messages: [], loaded: false },
   // Everyone's records for badges (crew_badges): user id → facts.
   badgeFacts: new Map(),
+  // Hypes and "I'm coming"s you haven't said you've seen yet.
+  pings: [],
   tab: readStored(TAB_KEY) || "now", board: readStored(BOARD_KEY) || "week", subject: "", place: "",
 };
 let channel = null;
@@ -351,10 +353,11 @@ async function loadCrews() {
 
 async function refresh() {
   const uid = state.user.id;
-  const [stats, live, feed, mine, keys, modules, watchers, recent, records] = await Promise.all([
+  const seenPings = pingsSeen();
+  const [stats, live, feed, mine, keys, modules, watchers, recent, records, pings] = await Promise.all([
     db.rpc("room_stats", { p_tz: TZ }),
     // Yours and your crewmates', as the database allows: who's studying, who's on a break.
-    db.from("live").select("user_id, session_id, subject, started_at, sitting_started_at, location, paused_at, paused_subject, banked_seconds, now_playing, checked_at"),
+    db.from("live").select("user_id, session_id, subject, started_at, sitting_started_at, location, paused_at, paused_subject, banked_seconds, now_playing, checked_at, study_group"),
     db.from("sessions").select("id, user_id, subject, started_at, ended_at, location").order("ended_at", { ascending: false }).limit(25),
     db.from("sessions").select("id, subject, started_at, ended_at, location").eq("user_id", uid).gte("started_at", new Date(Date.now() - 70 * 86400000).toISOString()).order("started_at", { ascending: false }).limit(400),
     db.from("link_keys").select("id, label, created_at, last_used_at").order("created_at"),
@@ -362,6 +365,8 @@ async function refresh() {
     db.from("watch_links").select("id, label, created_at, last_seen_at").order("created_at"),
     db.from("messages").select("id, crew_id, user_id, created_at").order("created_at", { ascending: false }).limit(60),
     db.rpc("crew_badges", { p_tz: TZ }),
+    // A new device looks back a day rather than through everything ever sent.
+    (seenPings ? db.from("pings").select(PING_COLUMNS).eq("to_user", uid).gt("id", seenPings) : db.from("pings").select(PING_COLUMNS).eq("to_user", uid).gt("created_at", new Date(Date.now() - 86400000).toISOString())).order("id", { ascending: false }).limit(50),
     loadCrews(),
   ]);
   if (MUSIC) db.rpc("my_music").then(({ data }) => { if (data) { const changed = JSON.stringify(data) !== JSON.stringify(state.music); state.music = data; if (changed && state.tab === "me") keepFocus(render); } });
@@ -381,6 +386,8 @@ async function refresh() {
   state.badgeFacts = new Map((records.data || []).map((row) => [row.user_id, row.facts]));
   announceBadges();
   state.modules = modules.data || [];
+  if (pings.data) state.pings = pings.data;
+  showPings();
   scheduleStillThere();
 }
 
@@ -475,8 +482,15 @@ function subscribe() {
   channel = db.channel("crew")
     .on("postgres_changes", { event: "*", schema: "public", table: "live" }, ({ new: row }) => {
       const before = row?.user_id && byId(row.user_id);
+      const mine = row?.user_id === state.user.id;
+      // Straight away, not after the refresh: the next event may be someone joining the group this just made.
+      if (mine && state.live) state.live = { ...state.live, study_group: row.study_group };
+      if (!mine && before && row.study_group && row.study_group === state.live?.study_group && state.liveRows.get(row.user_id)?.study_group !== row.study_group) {
+        state.liveRows.set(row.user_id, row);
+        notify(`👯 ${before.emoji} ${before.name} locked in with you`);
+      }
       // Coming back from a break, or saying "still here", isn't news; locking in is.
-      if (row?.started_at && !row.banked_seconds && !row.checked_at && row.user_id !== state.user.id && before && !before.live_started_at) {
+      else if (row?.started_at && !row.banked_seconds && !row.checked_at && row.user_id !== state.user.id && before && !before.live_started_at) {
         notify(`${before.emoji} ${before.name} just locked in on ${row.subject}${row.location ? ` at ${row.location}` : ""}`);
       }
       refreshSoon();
@@ -491,9 +505,60 @@ function subscribe() {
     .on("postgres_changes", { event: "DELETE", schema: "public", table: "messages" }, ({ old }) => lostMessage(old?.id))
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "pings", filter: `to_user=eq.${state.user.id}` }, ({ new: ping }) => {
       const who = byId(ping.from_user);
-      notify(ping.kind === "joining" ? `🏃 ${who?.name || "Someone"} is on the way to join you!` : `🔥 ${who?.name || "Someone"} is cheering you on!`);
+      // The card waits for them. A notification is for reaching them now, if they're elsewhere.
+      if (document.hidden) notify(ping.kind === "joining" ? `🏃 ${who?.name || "Someone"} is on the way to join you!` : `🔥 ${who?.name || "Someone"} is cheering you on!`);
+      state.pings = [ping, ...state.pings.filter((other) => other.id !== ping.id)];
+      showPings();
     })
     .subscribe();
+}
+
+/* ------------------------------------------------------------
+   Hypes and "I'm coming". They wait in the database, so one sent while
+   you were on another tab or the phone was asleep still reaches you,
+   and it stays on screen until you've said you've seen it. What's been
+   seen is per device, like chat. The card sits outside #app, so
+   repainting the page doesn't replay it.
+   ------------------------------------------------------------ */
+
+const PING_COLUMNS = "id, from_user, kind, created_at";
+const pingCard = h("div", { class: "pings", role: "status", hidden: true });
+document.body.append(pingCard);
+const pingsSeen = () => Number(readStored(`lockedin.pingsSeen.${state.user.id}`)) || 0;
+// The newest one already cheered for on this page, so each only sets off the confetti once.
+let pingsCheered = 0;
+
+function showPings() {
+  const seen = pingsSeen();
+  const waiting = state.pings.filter((ping) => ping.id > seen);
+  const lines = pingLines(waiting);
+  pingCard.hidden = !lines.length;
+  pingCard.replaceChildren(...(lines.length ? [
+    ...lines.map((line) => {
+      const who = byId(line.from_user);
+      const name = who?.name || "Someone";
+      return h("div", { class: "ping-line" },
+        h("span", { class: "avatar", "aria-hidden": "true" }, who?.emoji || "🔥"),
+        h("div", null,
+          h("strong", null, line.kind === "joining" ? `${name} is on the way 🏃` : `${name} hyped you${line.count > 1 ? ` ×${line.count}` : ""} 🔥`),
+          h("small", null, ago(line.last))));
+    }),
+    h("button", { class: "btn btn-small", onclick: pingsRead }, "Got it"),
+  ] : []));
+  const newest = Math.max(0, ...waiting.map((ping) => ping.id));
+  // Only with someone there to see it: a hidden tab has it waiting for when they're back.
+  if (!lines.length || document.hidden || newest <= pingsCheered) return;
+  pingsCheered = newest;
+  confetti(["🔥", "🙌", "🔥", "✨"]);
+  pingCard.classList.remove("pop");
+  void pingCard.offsetWidth;
+  pingCard.classList.add("pop");
+}
+
+function pingsRead() {
+  store(`lockedin.pingsSeen.${state.user.id}`, String(Math.max(pingsSeen(), ...state.pings.map((ping) => ping.id))));
+  state.pings = [];
+  showPings();
 }
 
 /* ------------------------------------------------------------
@@ -585,12 +650,13 @@ function musicSetting() {
    The timer
    ------------------------------------------------------------ */
 
-async function lockIn() {
+/** `together` is what joining someone adds: their group, and their place if they have one. Returns whether it worked. */
+async function lockIn(together = {}) {
   const subject = state.subject.trim();
   if (!subject) return toast("Pick a module first, or add one.", { bad: true });
   // A new sitting: whatever break was left over ends here.
   const now = new Date().toISOString();
-  const row = { user_id: state.user.id, session_id: crypto.randomUUID(), subject, started_at: now, sitting_started_at: now, location: state.place.trim() || null, paused_at: null, paused_subject: null, banked_seconds: 0 };
+  const row = { user_id: state.user.id, session_id: crypto.randomUUID(), subject, started_at: now, sitting_started_at: now, location: state.place.trim() || null, paused_at: null, paused_subject: null, banked_seconds: 0, study_group: null, ...together };
   const { error } = await db.from("live").upsert(row, { onConflict: "user_id" });
   if (error) return oops(error);
   state.live = row;
@@ -598,6 +664,7 @@ async function lockIn() {
   scrollTo({ top: 0, behavior: "smooth" });
   refreshSoon();
   askMusic();
+  return true;
 }
 
 /** Saves the stretch running now, if it's long enough to count. Returns its length, or null if that failed. */
@@ -703,10 +770,10 @@ async function switchModule(name, reviewed = false) {
 }
 
 /** Back from the break: a new stretch of the same sitting, in the same place, on whichever module you pick. */
-async function resume(subject = state.paused?.paused_subject) {
+async function resume(subject = state.paused?.paused_subject, together = {}) {
   const paused = state.paused;
   if (!paused) return;
-  const row = { session_id: crypto.randomUUID(), subject, started_at: new Date().toISOString(), location: paused.location, paused_at: null, paused_subject: null, banked_seconds: paused.banked_seconds };
+  const row = { session_id: crypto.randomUUID(), subject, started_at: new Date().toISOString(), location: paused.location, paused_at: null, paused_subject: null, banked_seconds: paused.banked_seconds, ...together };
   const { error } = await db.from("live").update(row).eq("user_id", state.user.id);
   if (error) return oops(error);
   state.paused = null;
@@ -714,6 +781,72 @@ async function resume(subject = state.paused?.paused_subject) {
   render();
   refreshSoon();
   askMusic();
+  return true;
+}
+
+/** Joining someone you're with: same place and group, your own module and clock. A timer already running just keeps going. */
+async function joinGroup(people, subject) {
+  const { data, error } = await db.rpc("study_group_with", { p_host: people[0].user_id });
+  if (error) { refreshSoon(); return oops(error); }
+  const together = { study_group: data.group, ...(data.location ? { location: data.location } : {}) };
+  const live = state.live;
+  if (live) {
+    // Only this timer: if it was stopped or replaced on another device, nothing changes. Joining counts as being here.
+    const { data: rows, error: failed } = await db.from("live").update({ ...together, checked_at: new Date().toISOString() }).eq("user_id", state.user.id).eq("session_id", live.session_id).select("session_id");
+    if (failed) return oops(failed);
+    if (!rows?.length) { await refresh(); render(); return toast("That timer isn't running any more.", { bad: true }); }
+    state.live = { ...live, ...together };
+    render();
+    refreshSoon();
+  } else if (state.paused) {
+    if (!await resume(subject, together)) return;
+  } else {
+    state.subject = subject;
+    if (!await lockIn(together)) return;
+  }
+  toast(`👯 Locked in with ${listNames(people.map((p) => p.name))}`);
+}
+
+/** Went your separate ways: the timer keeps going, on your own. */
+async function leaveGroup() {
+  const live = state.live;
+  if (!live) return;
+  const { error } = await db.from("live").update({ study_group: null }).eq("user_id", state.user.id).eq("session_id", live.session_id);
+  if (error) return oops(error);
+  state.live = { ...live, study_group: null };
+  render();
+  refreshSoon();
+}
+
+function joinSheet(people) {
+  const names = listNames(people.map((p) => p.name));
+  const place = people.find((p) => p.live_location)?.live_location;
+  const { live, paused } = state;
+  let subject = paused ? paused.paused_subject : state.subject;
+  const go = h("button", { class: "btn btn-live" });
+  const chips = h("div", { class: "chips module-chips", role: "group", "aria-label": "Your modules" });
+  function paint() {
+    go.textContent = live ? `👯 Join ${names}` : `${paused ? "▶ Resume" : "🔒 Lock in"} with ${names}`;
+    go.disabled = !live && !subject;
+    const choices = [...new Set([...(paused ? [paused.paused_subject] : []), ...activeModules().map((m) => m.name)])];
+    chips.replaceChildren(
+      ...choices.map((name) => h("button", { type: "button", class: "chip module-chip", "aria-pressed": String(name === subject), onclick: () => { subject = name; paint(); } }, dot(moduleNamed(name)), name)),
+      h("button", { type: "button", class: "chip chip-add", onclick: () => addModuleSheet((added) => { subject = added.name; paint(); }) }, "+ Add"));
+  }
+  paint();
+  sheet((box, close) => {
+    go.addEventListener("click", async () => { go.disabled = true; close(); await joinGroup(people, subject); });
+    box.append(
+      h("h2", null, `Lock in with ${names} 👯`),
+      h("p", { class: "muted", style: { marginTop: "6px" } }, live
+        ? `Your timer keeps going on ${live.subject}, and you'll show up together on the Now page.`
+        : "Your own module and your own clock. You'll show up together on the Now page."),
+      live ? null : h("div", { class: "field" }, h("span", { class: "label" }, "What are you studying?"), chips),
+      place ? (state.me.share_location
+        ? h("p", { class: "running-where" }, "📍 ", place)
+        : h("p", { class: "small muted", style: { marginTop: "12px" } }, "Location sharing is off, so your place stays hidden.")) : null,
+      h("div", { class: "btn-row" }, h("button", { class: "btn btn-soft", onclick: close }, "Cancel"), go));
+  }, { key: "join" });
 }
 
 /** Done from a break: nothing left to save, so just close the sitting. */
@@ -823,12 +956,14 @@ function nowView() {
     .sort((a, b) => +new Date(a.live_started_at) - +new Date(b.live_started_at));
   const me = byId(state.user.id);
   const crewToday = state.people.reduce((sum, p) => sum + p.today_minutes, 0);
+  // Whoever you're sitting with comes first.
+  const groups = studyGroups(others, groupOf).sort((a, b) => withMe(b) - withMe(a));
   return [
     state.live ? runningCard() : state.paused ? pausedCard() : startCard(),
     h("section", { class: "section" },
       h("div", { class: "section-head" }, h("h2", null, "Locked in right now"), h("small", null, [others.length ? `${others.length} studying` : "", state.breaks.length ? `${state.breaks.length} on a break` : ""].filter(Boolean).join(" · "))),
       others.length || state.breaks.length
-        ? [...others.map(liveCard), ...state.breaks.map(breakCard)]
+        ? [...groups.map(liveGroup), ...state.breaks.map(breakCard)]
         : h("div", { class: "card empty" }, h("span", { class: "big" }, "🦗"), state.live ? "Just you. Lead by example." : "Nobody's locked in. Be the first.")),
     h("section", { class: "section today" },
       h("div", { class: "stat" }, h("span", null, "You today"), h("strong", null, hm(me?.today_minutes || 0))),
@@ -871,6 +1006,7 @@ const sittingClock = (row, className) => h("div", { class: className, dataset: {
 function runningCard() {
   const live = state.live;
   const waiting = unconfirmed(live);
+  const mates = matesOf(state.user.id, live.study_group);
   return h("section", { class: `card running${waiting ? " is-unconfirmed" : ""}` },
     h("span", { class: "running-tag" }, waiting ? "STILL LOCKED IN?" : "LOCKED IN"),
     h("h2", null, live.subject),
@@ -882,6 +1018,7 @@ function runningCard() {
         h("button", { class: "btn btn-soft", onclick: () => editTimerSheet() }, "I stopped earlier"),
         h("button", { class: "btn", onclick: () => stillHere() }, "Yes, still going"))) : null,
     live.location ? h("p", { class: "running-where" }, "📍 ", live.location) : null,
+    mates.length ? h("p", { class: "running-where" }, `👯 With ${listNames(mates.map((p) => p.name))} · `, h("button", { class: "link", onclick: () => leaveGroup() }, "Leave")) : null,
     playingLine(live.now_playing),
     switchChips(live.subject),
     h("div", { class: "running-actions" },
@@ -925,22 +1062,52 @@ function pausedCard() {
     h("p", { class: "small muted running-foot" }, "Your crew sees you're on a break. The time so far is saved."));
 }
 
+const groupOf = (p) => state.liveRows.get(p.user_id)?.study_group || null;
+/** Whether this group of people on the Now page is the one you're in. */
+const withMe = (people) => Boolean(state.live?.study_group) && groupOf(people[0]) === state.live.study_group;
+/** Who's studying in that group, besides this person. */
+const matesOf = (userId, group) => (group ? state.people.filter((p) => p.user_id !== userId && p.live_started_at && groupOf(p) === group) : []);
+
+async function sendPing(people, kind) {
+  const sent = await Promise.all(people.map((p) => db.from("pings").insert({ to_user: p.user_id, kind })));
+  const failed = sent.find((result) => result.error);
+  if (failed) return oops(failed.error);
+  const names = listNames(people.map((p) => p.name));
+  toast(kind === "joining" ? `Told ${names} you're coming 🏃` : `Sent ${names} some fire 🔥`);
+}
+
+/** Their name, clock and module; `place` if it should be shown here. */
+const liveWho = (p, place) => personButton(p, "live-person",
+  h("span", { class: "avatar is-live", "aria-hidden": "true" }, p.emoji),
+  h("div", { class: "live-who" },
+    h("strong", null, p.name), " ", sittingClock({ started_at: p.live_started_at, banked_seconds: state.liveRows.get(p.user_id)?.banked_seconds }, "live-clock"),
+    h("p", null, p.live_subject, place ? ` · 📍 ${place}` : "")));
+
 function liveCard(p) {
-  const ping = async (kind) => {
-    const { error } = await db.from("pings").insert({ to_user: p.user_id, kind });
-    if (error) return oops(error);
-    toast(kind === "joining" ? `Told ${p.name} you're coming 🏃` : `Sent ${p.name} some fire 🔥`);
-  };
   return h("article", { class: "card live-card" },
-    personButton(p, "live-person",
-      h("span", { class: "avatar is-live", "aria-hidden": "true" }, p.emoji),
-      h("div", { class: "live-who" },
-        h("strong", null, p.name), " ", sittingClock({ started_at: p.live_started_at, banked_seconds: state.liveRows.get(p.user_id)?.banked_seconds }, "live-clock"),
-        h("p", null, p.live_subject, p.live_location ? ` · 📍 ${p.live_location}` : ""))),
+    liveWho(p, p.live_location),
     playingLine(state.liveRows.get(p.user_id)?.now_playing),
     state.watching ? null : h("div", { class: "live-actions" },
-      p.live_location ? h("button", { class: "btn btn-small btn-live", onclick: () => ping("joining") }, "🏃 I'm coming") : null,
-      h("button", { class: "btn btn-small btn-soft", onclick: () => ping("cheer") }, "🔥 Hype")));
+      h("button", { class: "btn btn-small btn-live", onclick: () => joinSheet([p]) }, "👯 Join"),
+      p.live_location ? h("button", { class: "btn btn-small btn-soft", onclick: () => sendPing([p], "joining") }, "🏃 I'm coming") : null,
+      h("button", { class: "btn btn-small btn-soft", onclick: () => sendPing([p], "cheer") }, "🔥 Hype")));
+}
+
+/** Someone on their own, or everyone sitting together under one heading. */
+function liveGroup(people) {
+  const mine = withMe(people);
+  if (people.length === 1 && !mine) return liveCard(people[0]);
+  const place = people.find((p) => p.live_location)?.live_location;
+  return h("article", { class: "card group-card" },
+    h("p", { class: "group-head" }, `👯 ${mine ? "With you" : "Studying together"}`, place ? ` · 📍 ${place}` : ""),
+    people.map((p) => h("div", { class: "group-member" },
+      // Someone who's since moved says so.
+      liveWho(p, p.live_location !== place ? p.live_location : null),
+      state.watching ? null : h("button", { class: "btn btn-small btn-soft", "aria-label": `Hype ${p.name}`, onclick: () => sendPing([p], "cheer") }, "🔥"),
+      playingLine(state.liveRows.get(p.user_id)?.now_playing))),
+    state.watching || mine ? null : h("div", { class: "live-actions" },
+      h("button", { class: "btn btn-small btn-live", onclick: () => joinSheet(people) }, "👯 Join them"),
+      place ? h("button", { class: "btn btn-small btn-soft", onclick: () => sendPing(people, "joining") }, "🏃 I'm coming") : null));
 }
 
 function breakCard(row) {
@@ -1250,6 +1417,7 @@ function badgesSection(person) {
   const facts = state.badgeFacts.get(person.user_id);
   if (!facts) return h("section", { class: "section" }, h("div", { class: "section-head" }, h("h2", null, "Badges")), h("div", { class: "card empty" }, "Badges show up once the crew's loaded."));
   const badges = badgesFor(facts);
+  const streak = streakFrom(person.days);
   const mine = person.user_id === state.user.id;
   // On a watch page the person is the one who shared it, so it's their name, not "you".
   const you = mine && !state.watching;
@@ -1271,12 +1439,12 @@ function badgesSection(person) {
     explain(node, () => [
       hidden ? "❓ Secret badge" : `${badge.icon} ${badge.name}`,
       hidden ? badge.hint : badge.detail,
-      badge.got ? (you ? "You've got it 🏅" : `${person.name} has it 🏅`) : progress ? `${progress} · ${badgeToGo(badge)}` : "Not yet",
+      badge.got ? (you ? "You've got it 🏅" : `${person.name} has it 🏅`) : progress ? `${progress} · ${addsUp(badge, streak) ? badgeToGo(badge) : "best so far"}` : "Not yet",
       have ? `${have} of ${crew.length} in the crew ${have === 1 ? "has" : "have"} it` : "Nobody in the crew has it yet",
     ]);
     return node;
   };
-  const next = mine ? nextBadges(badges) : [];
+  const next = mine ? nextBadges(badges, streak) : [];
   return h("section", { class: "section" },
     h("div", { class: "section-head" }, h("h2", null, "Badges"), h("small", null, `${badges.filter((x) => x.got).length} of ${badges.length}`)),
     next.length ? h("div", { class: "card next-badges" },
@@ -1651,6 +1819,7 @@ function paintWatch(data) {
 /** The person who shared the link: studying now or not, then their profile. */
 function watchPerson(who, { sessions, modules }) {
   const row = state.liveRows.get(who.user_id);
+  const mates = matesOf(who.user_id, row?.study_group);
   const last = sessions[0];
   const today = `Today: ${who.today_minutes ? hm(who.today_minutes) : "nothing yet"}`;
   const status = who.live_started_at
@@ -1659,6 +1828,7 @@ function watchPerson(who, { sessions, modules }) {
       h("h2", null, who.live_subject),
       sittingClock({ started_at: who.live_started_at, banked_seconds: row?.banked_seconds }, "big-clock"),
       who.live_location ? h("p", { class: "running-where" }, "📍 ", who.live_location) : null,
+      mates.length ? h("p", { class: "running-where" }, `👯 With ${listNames(mates.map((p) => p.name))}`) : null,
       playingLine(row?.now_playing),
       h("p", { class: "running-where" }, today))
     : h("section", { class: `card watch-status${row?.paused_at ? " is-break" : ""}` },
@@ -1683,7 +1853,7 @@ function watchCrew() {
     h("section", { class: "section watch-live" },
       h("div", { class: "section-head" }, h("h2", null, "Locked in right now"), h("small", null, [live.length ? `${live.length} studying` : "", state.breaks.length ? `${state.breaks.length} on a break` : ""].filter(Boolean).join(" · "))),
       live.length || state.breaks.length
-        ? [...live.map(liveCard), ...state.breaks.map(breakCard)]
+        ? [...studyGroups(live, groupOf).map(liveGroup), ...state.breaks.map(breakCard)]
         : h("div", { class: "card empty" }, h("span", { class: "big" }, "🦗"), "Nobody's locked in right now.")),
     h("div", { class: "section" }, boardView()),
   ];
@@ -1929,7 +2099,7 @@ function tick() {
   for (const node of document.querySelectorAll("[data-xp-since]")) node.textContent = String(Math.floor((now - +new Date(node.dataset.xpSince) + (Number(node.dataset.banked) || 0) * 1000) / 60000));
 }
 setInterval(() => { if (!document.hidden) tick(); }, 1000);
-document.addEventListener("visibilitychange", () => { if (!document.hidden && state.me && state.crews.length) refreshSoon(); });
+document.addEventListener("visibilitychange", () => { if (!document.hidden && state.me && state.crews.length) { showPings(); refreshSoon(); } });
 
 /* ------------------------------------------------------------
    Updates. Browsers keep these files for 10 minutes (GitHub Pages'

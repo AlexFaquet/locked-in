@@ -182,6 +182,13 @@ p { margin: 0; }
 .running .now-playing { margin-top: 14px; }
 .setting small.setting-problem { color: var(--danger); }
 .live-actions .btn { flex: 1; }
+/* Studying together: one card, everyone in it. */
+.group-card { display: grid; gap: 12px; border-color: var(--live); }
+.group-card + .live-card, .live-card + .group-card, .group-card + .group-card { margin-top: 12px; }
+.group-head { color: var(--live-press); font: 600 15px var(--display); overflow-wrap: anywhere; }
+.group-member { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 12px; align-items: center; }
+.group-member .live-person { grid-column: auto; }
+.group-card .live-actions { flex-wrap: wrap; }
 .empty { text-align: center; padding: 26px 18px; color: var(--muted); font-weight: 700; }
 .empty .big { display: block; font-size: 40px; margin-bottom: 8px; }
 
@@ -303,6 +310,14 @@ p { margin: 0; }
 .toast { pointer-events: auto; padding: 14px 16px; border-radius: 18px; background: var(--ink); color: var(--bg); font-weight: 800; box-shadow: 0 10px 30px rgba(0, 0, 0, .25); animation: pop .28s cubic-bezier(.2, 1.4, .4, 1); }
 .toast.bad { background: var(--danger); color: #fff; }
 @keyframes pop { from { transform: translateY(14px) scale(.96); opacity: 0; } }
+/* A hype waits here until it's been seen, on every tab, above the page but under any sheet. */
+.pings { position: fixed; left: 50%; top: calc(10px + env(safe-area-inset-top)); transform: translateX(-50%); width: min(520px, calc(100% - 32px)); z-index: 20; display: grid; gap: 10px; padding: 14px; border-radius: 22px; background: var(--card); border: 2px solid var(--flame); box-shadow: 0 6px 0 var(--flame), 0 18px 40px rgba(30, 27, 46, .18); }
+.pings.pop { animation: ping-in .35s cubic-bezier(.2, 1.4, .4, 1); }
+@keyframes ping-in { from { transform: translateX(-50%) translateY(-18px) scale(.96); opacity: 0; } }
+.ping-line { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; align-items: center; }
+.ping-line .avatar { width: 40px; height: 40px; font-size: 21px; }
+.ping-line strong { display: block; font: 600 16px var(--display); overflow-wrap: anywhere; }
+.ping-line small { color: var(--muted); font-weight: 700; font-size: 13px; }
 
 /* While a sheet is open the page behind can't scroll, and a swipe on the dimmed area does nothing. */
 html.sheet-open, html.sheet-open body { overflow: hidden; }

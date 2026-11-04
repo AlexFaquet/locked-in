@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { levelFor, levelProgress, minutesForLevel, streakFrom, badgesFor, badgeProgress, nextBadges, standings, chaseLine, hm, clock, untilReset, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, STILL_THERE_MS, hiddenFrom, longStretch, unconfirmed } from "../game.mjs";
+import { levelFor, levelProgress, minutesForLevel, streakFrom, badgesFor, badgeProgress, addsUp, nextBadges, listNames, studyGroups, pingLines, ON_THE_WAY_MS, standings, chaseLine, hm, clock, untilReset, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, STILL_THERE_MS, hiddenFrom, longStretch, unconfirmed } from "../game.mjs";
 
 test("levels get steeper and the bar measures progress inside one", () => {
   assert.deepEqual([0, 149, 150, 599, 600, 2400, 12150].map(levelFor), [1, 1, 2, 2, 3, 5, 10]);
@@ -44,8 +44,9 @@ test("badges come from records, and say how far along you are", () => {
   assert.equal(badgeProgress(byId.ascended), "38h 45m / 1,000h");
   assert.equal(badgeProgress(byId.christmas), null, "a once-off has no bar");
   assert.equal(badgeProgress(byId.first), null, "an earned one has no bar");
-  // Nearest first: 38h45m of 50h, 3h40m of 5h, 10 of 14 days.
-  assert.deepEqual(nextBadges(badges).map((badge) => badge.id), ["fifty", "iron", "unstoppable"]);
+  // Nearest first, and only what's really within reach: 38h45m of 50h, not 3h40m of a 5-hour sitting.
+  assert.equal(nextBadges(badges)[0].id, "fifty");
+  assert.ok(!nextBadges(badges).some((badge) => badge.id === "iron"));
   assert.ok(badgesFor({}).every((badge) => !badge.got), "nobody starts with anything");
 });
 test("formatting", () => {
@@ -121,4 +122,38 @@ test("a stretch of 3 hours or more gets a second look, even after saying still h
   assert.equal(unconfirmed(row, start + STILL_THERE_MS), false, "confirmed just now, and still worth asking");
   assert.equal(longStretch(null), false);
   assert.equal(longStretch({ started_at: null, paused_at: "2026-11-04T09:00:00Z" }), false);
+});
+
+test("next up only promises what more of the same would earn", () => {
+  const badges = badgesFor({ best_day: 488, longest_sitting: 220, best_week: 1668, best_weekend: 200, most_modules_day: 3, most_alongside: 1, best_win_run: 1, total_minutes: 3141, hypes_sent: 20, best_streak: 14 });
+  const next = (streak) => nextBadges(badges, streak, 50).map((badge) => badge.id);
+  for (const id of ["lifer", "iron", "shift", "unit", "fulltime", "polymath", "party", "house", "dynasty"]) assert.ok(!next(14).includes(id), `${id} has to happen in one go`);
+  for (const id of ["hype", "hundred"]) assert.ok(next(14).includes(id), `${id} adds up`);
+  assert.ok(next(14).includes("habit"), "on your longest streak, more days really do get you there");
+  assert.ok(!next(3).includes("habit"), "on a shorter one they don't");
+  const lifer = badges.find((badge) => badge.id === "lifer");
+  assert.equal(addsUp(lifer), false);
+});
+
+test("people studying together are grouped, and everyone else stands alone", () => {
+  const people = [{ user_id: "a" }, { user_id: "b" }, { user_id: "c" }, { user_id: "d" }];
+  const keys = { a: "k", c: "k", d: "lonely" };
+  assert.deepEqual(studyGroups(people, (p) => keys[p.user_id]).map((group) => group.map((p) => p.user_id)), [["a", "c"], ["b"], ["d"]]);
+  assert.deepEqual([listNames(["Luke"]), listNames(["Luke", "Miguel"]), listNames(["Luke", "Miguel", "Connor"])], ["Luke", "Luke and Miguel", "Luke, Miguel and Connor"]);
+});
+
+test("waiting pings become one line per person, and 'I'm coming' goes stale", () => {
+  const now = Date.parse("2026-11-04T12:00:00Z");
+  const at = (minutes) => new Date(now - minutes * 60000).toISOString();
+  const lines = pingLines([
+    { from_user: "b", kind: "cheer", created_at: at(5) },
+    { from_user: "a", kind: "cheer", created_at: at(90) },
+    { from_user: "a", kind: "cheer", created_at: at(2) },
+    { from_user: "a", kind: "joining", created_at: at(30) },
+    { from_user: "b", kind: "joining", created_at: at(ON_THE_WAY_MS / 60000 + 1) },
+    { from_user: "c", kind: "cheer", created_at: at(3000) },
+  ], now);
+  assert.deepEqual(lines.map((line) => [line.from_user, line.kind, line.count]), [["a", "cheer", 2], ["b", "cheer", 1], ["a", "joining", 1], ["c", "cheer", 1]]);
+  assert.equal(lines[0].last, at(2));
+  assert.deepEqual(pingLines([], now), []);
 });

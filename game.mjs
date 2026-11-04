@@ -142,9 +142,46 @@ export function badgeProgress(badge) {
   return `${badge.value} / ${badge.goal}${badge.unit === "days" ? " days" : ""}`;
 }
 
-/** The badges someone is closest to, for "next up": started, not secret, nearest first. */
-export const nextBadges = (badges, count = 3) =>
-  badges.filter((badge) => !badge.got && !badge.secret && badge.ratio > 0 && badge.goal > 1).sort((a, b) => b.ratio - a.ratio).slice(0, count);
+/* Records set in one go: a longer sitting, a bigger day. Studying some other time doesn't
+   add to them, so there's no honest way to say how much is left. */
+const ONE_GO = new Set(["longest_sitting", "best_day", "most_modules_day", "best_weekend", "best_week", "most_alongside", "best_win_run"]);
+
+/** Would more of the same get you there? Not for a one-go record, nor for a streak longer than the one you're on. */
+export const addsUp = (badge, streak = 0) => (badge.key === "best_streak" ? streak >= badge.value : !ONE_GO.has(badge.key));
+
+/** The badges someone is closest to, for "next up": started, not secret, really within reach, nearest first. */
+export const nextBadges = (badges, streak = 0, count = 3) =>
+  badges.filter((badge) => !badge.got && !badge.secret && badge.ratio > 0 && badge.goal > 1 && addsUp(badge, streak)).sort((a, b) => b.ratio - a.ratio).slice(0, count);
+
+/** "Luke", "Luke and Miguel", "Luke, Miguel and Connor". */
+export const listNames = (names) => (names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`);
+
+/** People locked in right now, in the groups they joined; someone on their own is a group of one. `groupOf` gives a person's key. */
+export function studyGroups(people, groupOf) {
+  const groups = new Map();
+  for (const person of people) {
+    const key = groupOf(person) || person.user_id;
+    groups.set(key, [...(groups.get(key) || []), person]);
+  }
+  return [...groups.values()];
+}
+
+/** How long "I'm coming" is worth showing. A hype is nice to see whenever. */
+export const ON_THE_WAY_MS = 60 * 60000;
+
+/** Pings waiting to be seen: one line per person and kind, newest first. */
+export function pingLines(pings = [], now = Date.now()) {
+  const lines = new Map();
+  for (const ping of pings) {
+    if (ping.kind === "joining" && now - +new Date(ping.created_at) > ON_THE_WAY_MS) continue;
+    const key = `${ping.from_user}:${ping.kind}`;
+    const line = lines.get(key) || { from_user: ping.from_user, kind: ping.kind, count: 0, last: ping.created_at };
+    line.count++;
+    if (+new Date(ping.created_at) > +new Date(line.last)) line.last = ping.created_at;
+    lines.set(key, line);
+  }
+  return [...lines.values()].sort((a, b) => +new Date(b.last) - +new Date(a.last));
+}
 
 /** This week's race, highest first. Ties go to whoever has the longer streak, then alphabetically. */
 export function standings(people, key = "week_minutes", now = new Date()) {

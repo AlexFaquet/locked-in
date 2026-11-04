@@ -47,6 +47,13 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
   doesn't see you as live and the board stops counting at the 3-hour mark.
   *Yes, still going* puts it all back; *I stopped earlier* opens Edit, where
   *Stopped at* saves what you really did.
+- **Lock in with someone.** *Join* on a friend's card (or *Join them* on a
+  group's) starts your own timer on your own module, with their place as
+  yours. A timer that's already running just keeps going. The Now page shows
+  you together, and *Leave* splits you off again without stopping the clock.
+- **Hype that waits.** A hype or "I'm coming" stays on screen, on every tab,
+  until you tap *Got it*, including ones sent while the app was in the
+  background or closed.
 - **Earn XP** — a point a minute. Levels get steeper (Level 2 at 2.5 hours,
   Level 5 at 40, Level 10 at 202.5). Streaks count days with 30+ minutes.
 - **Badges** — 41 of them, in eight groups: the grind (3, 5, 8 and 12 hours

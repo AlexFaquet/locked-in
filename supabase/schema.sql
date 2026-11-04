@@ -84,6 +84,8 @@ create table public.live (
   -- When the whole sitting began. A break or a module switch saves the stretch so far and
   -- starts the clock again (started_at); this stays put, so Edit shows the real start.
   sitting_started_at timestamptz,
+  -- Who's sitting together: everyone in a group has the same key (see study_group_with).
+  study_group uuid,
   updated_at timestamptz not null default now(),
   constraint live_shape check ((started_at is null) = (subject is null) and (started_at is null) = (session_id is null)),
   constraint live_pause_shape check ((paused_at is null) = (paused_subject is null) and (paused_at is null or started_at is null))
@@ -220,8 +222,8 @@ grant select on public.crews to authenticated;
 grant select, delete on public.crew_members to authenticated;
 grant select on public.live to authenticated;
 -- Every column but now_playing, so nobody can put a fake track on the board.
-grant insert (user_id, session_id, subject, started_at, location, paused_at, paused_subject, banked_seconds, checked_at, sitting_started_at) on public.live to authenticated;
-grant update (user_id, session_id, subject, started_at, location, paused_at, paused_subject, banked_seconds, checked_at, sitting_started_at) on public.live to authenticated;
+grant insert (user_id, session_id, subject, started_at, location, paused_at, paused_subject, banked_seconds, checked_at, sitting_started_at, study_group) on public.live to authenticated;
+grant update (user_id, session_id, subject, started_at, location, paused_at, paused_subject, banked_seconds, checked_at, sitting_started_at, study_group) on public.live to authenticated;
 grant select, insert on public.pings to authenticated;
 grant insert, delete on public.link_keys to authenticated;
 -- user_id is needed by the delete policy; key_hash is never readable.
@@ -263,11 +265,13 @@ begin
     new.paused_subject := null;
     new.banked_seconds := 0;
     new.sitting_started_at := new.started_at;
+    new.study_group := null;
   end if;
   -- Nothing running and no break: there's no sitting to carry on.
   if new.started_at is null and new.paused_at is null then
     new.banked_seconds := 0;
     new.sitting_started_at := null;
+    new.study_group := null;
   end if;
   -- A timer started by something that doesn't know about sittings starts one; none starts after its own stretch.
   if new.started_at is not null and (new.sitting_started_at is null or new.sitting_started_at > new.started_at) then
@@ -998,7 +1002,7 @@ begin
                from private.stats_for(v_link.user_id, p_tz) st),
     -- Running timers anyone can see, and breaks under 3 hours old. Locations are kept only for people who share them.
     'live', (select coalesce(jsonb_agg(jsonb_build_object('user_id', l.user_id, 'subject', l.subject, 'started_at', l.started_at, 'location', l.location,
-                                                          'paused_at', l.paused_at, 'paused_subject', l.paused_subject, 'banked_seconds', l.banked_seconds, 'now_playing', l.now_playing)), '[]'::jsonb)
+                                                          'paused_at', l.paused_at, 'paused_subject', l.paused_subject, 'banked_seconds', l.banked_seconds, 'now_playing', l.now_playing, 'study_group', l.study_group)), '[]'::jsonb)
              from public.live l
              where l.user_id = any(v_people)
                and ((l.started_at is not null and private.hidden_from(l.started_at, l.checked_at) > now())
@@ -1464,3 +1468,37 @@ as $$
 $$;
 revoke execute on function public.crew_module_split(uuid, text) from public, anon;
 grant execute on function public.crew_module_split(uuid, text) to authenticated;
+
+/* ------------------------------------------------------------
+   Studying together. Joining someone gives you their group's key (made
+   now if they're on their own) and their place. Their row can only be
+   written here; yours is written through the normal rules, so a joiner
+   who doesn't share their location doesn't get a place kept.
+   ------------------------------------------------------------ */
+
+create function public.study_group_with(p_host uuid)
+returns jsonb
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_host record;
+  v_group uuid;
+begin
+  if p_host = (select auth.uid()) or not private.shares_crew(p_host) then
+    raise exception 'You can only lock in with someone in your crew.' using errcode = '42501';
+  end if;
+  select l.study_group, l.location into v_host
+  from public.live l
+  where l.user_id = p_host and l.started_at is not null and private.hidden_from(l.started_at, l.checked_at) > now()
+  for update;
+  if not found then
+    raise exception 'They''re not locked in any more.' using errcode = '22023';
+  end if;
+  v_group := coalesce(v_host.study_group, gen_random_uuid());
+  if v_host.study_group is null then
+    update public.live set study_group = v_group where user_id = p_host;
+  end if;
+  return jsonb_build_object('group', v_group, 'location', v_host.location);
+end $$;
+revoke execute on function public.study_group_with(uuid) from public, anon;
+grant execute on function public.study_group_with(uuid) to authenticated;
