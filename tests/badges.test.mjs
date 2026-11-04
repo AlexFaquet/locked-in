@@ -28,3 +28,10 @@ test("only crew badges outlast the records behind them", () => {
   const lasting = [...block[1].matchAll(/'([^']+)'/g)].map(([, id]) => id).sort();
   assert.deepEqual(lasting, BADGES.filter((badge) => badge.group === "crew").map((badge) => badge.id).sort());
 });
+
+// A day showing 30m on the flame has to count for the streak badges too.
+test("streak badges count days the way the flame does", () => {
+  const schema = readFileSync(new URL("../supabase/schema.sql", import.meta.url), "utf8");
+  assert.match(schema, /round\(sum\(extract\(epoch from t\.ended_at - t\.started_at\)\) \/ 60\)::integer as minutes/, "stats_for rounds each day");
+  assert.match(schema, /good_days as \(select d\.user_id, d\.day from daily d where round\(d\.minutes\) >= 30\)/, "badge_facts rounds each day");
+});

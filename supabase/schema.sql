@@ -1104,7 +1104,8 @@ as $$
            sum(s.minutes) filter (where extract(isodow from s.ls) in (6, 7)) as weekend
     from s group by 1, 2
   ),
-  good_days as (select d.user_id, d.day from daily d where d.minutes >= 30),
+  -- Rounded like the days behind the flame (stats_for), so the flame and the badges always agree.
+  good_days as (select d.user_id, d.day from daily d where round(d.minutes) >= 30),
   streaks as (
     select g.user_id, count(*) as days
     from (select gd.user_id, gd.day, gd.day - (row_number() over (partition by gd.user_id order by gd.day))::int as run from good_days gd) g
