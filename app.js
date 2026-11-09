@@ -9,7 +9,15 @@ import { SUPABASE_URL, SUPABASE_KEY, MUSIC } from "./config.js";
 import { levelProgress, ranksFor, streakFrom, badgesFor, badgeProgress, addsUp, nextBadges, listNames, studyGroups, pingLines, BADGES, BADGE_GROUPS, standings, chaseLine, hm, clock, untilReset, ago, TZ, ukDay, ukAt, dayStart, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, hiddenFrom, longStretch, unconfirmed } from "./game.mjs";
 
 const db = createClient(SUPABASE_URL, SUPABASE_KEY);
-const EMOJI = ["📚", "🦊", "🐼", "🐸", "🦉", "🐯", "🐙", "🦄", "🐧", "🐨", "🦁", "🐵", "🐳", "🌵", "🍄", "⚡️", "🚀", "🎧", "☕️", "🧠"];
+const EMOJI = [
+  "📚",
+  "🦊", "🐼", "🐯", "🦁", "🐨", "🐵", "🦄", "🐶", "🐱", "🐭", "🐹", "🐰", "🐻", "🐮", "🐷", "🐴", "🐺", "🦝", "🦔", "🐿️", "🦇", "🦥", "🦦", "🦘", "🐘", "🦒", "🦓", "🦏", "🦌", "🐑", "🐐", "🦙", "🐫", "🦍",
+  "🦉", "🐧", "🐔", "🐥", "🦆", "🦅", "🦩", "🦚", "🦜",
+  "🐸", "🐢", "🐊", "🦎", "🐍", "🦖",
+  "🐳", "🐙", "🐠", "🦈", "🐬", "🦭", "🦀",
+  "🐌", "🐝", "🦋", "🐞",
+  "🌵", "🍄", "⚡️", "🚀", "🎧", "☕️", "🧠",
+];
 const MIN_SESSION_MS = 60000;
 const MAX_SESSION_MS = 16 * 3600000;
 const JOIN_KEY = "lockedin.join";
@@ -169,11 +177,17 @@ if (window.visualViewport) {
 }
 
 function emojiPicker(current, onPick) {
-  return h("div", { class: "emoji-grid", role: "group", "aria-label": "Pick your emoji" },
+  const grid = h("div", { class: "emoji-grid", role: "group", "aria-label": "Pick your emoji" },
     EMOJI.map((e) => h("button", { type: "button", class: "emoji-pick", "aria-pressed": String(e === current), "aria-label": e, onclick: (ev) => {
       ev.currentTarget.parentNode.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b === ev.currentTarget)));
       onPick(e);
     } }, e)));
+  // It's a long list: open on the one that's picked, once the grid is on the page.
+  requestAnimationFrame(() => {
+    const picked = grid.querySelector('[aria-pressed="true"]');
+    if (picked) grid.scrollTop = picked.offsetTop - (grid.clientHeight - picked.offsetHeight) / 2;
+  });
+  return grid;
 }
 
 /** Re-rendering mustn't throw away what someone is halfway through typing. */
