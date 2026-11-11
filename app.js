@@ -6,7 +6,7 @@
 
 import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/+esm";
 import { SUPABASE_URL, SUPABASE_KEY, MUSIC } from "./config.js";
-import { levelProgress, ranksFor, streakFrom, badgesFor, badgeProgress, addsUp, nextBadges, listNames, studyGroups, pingLines, BADGES, BADGE_GROUPS, standings, chaseLine, hm, clock, untilReset, ago, TZ, ukDay, ukAt, dayStart, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, hiddenFrom, longStretch, unconfirmed } from "./game.mjs";
+import { levelProgress, ranksFor, streakFrom, badgesFor, badgeProgress, addsUp, nextBadges, listNames, studyGroups, pingLines, BADGES, BADGE_GROUPS, standings, chaseLine, hm, clock, untilReset, ago, TZ, ukDay, ukAt, dayStart, encodeLinkCode, weekStart, weeksFrom, subjectsBetween, hourTicks, shortHours, sittingMs, onBreak, BREAK_KEPT_MS, BREAK_SHOWN_MS, hiddenFrom, longStretch, unconfirmed, rankedFor, TIERS, RANKED_WEEKS, weekHours, tierMove, COINS_PER_HOUR, SHOP, SHOP_KINDS, shopItem, REACTIONS, CHEERS, reactionChips, groupedLines } from "./game.mjs";
 
 const db = createClient(SUPABASE_URL, SUPABASE_KEY);
 const EMOJI = [
@@ -42,6 +42,14 @@ const state = {
   badgeFacts: new Map(),
   // Hypes and "I'm coming"s you haven't said you've seen yet.
   pings: [],
+  // On a watch page: the link's secret, for sending a cheer.
+  watchToken: null,
+  // What everyone's wearing and the treats they've been given (crew_flair): user id → { frame, color, tag, treats }.
+  flair: new Map(),
+  // Your coins and the things you have to wear (my_wallet).
+  wallet: { coins: 0, owned: [] },
+  // Gifts from crewmates and cheers from watch links you haven't said you've seen yet.
+  gifts: [], cheers: [],
   tab: readStored(TAB_KEY) || "now", board: readStored(BOARD_KEY) || "week", subject: "", place: "",
 };
 let channel = null;
@@ -73,6 +81,19 @@ function store(key, value) { try { localStorage.setItem(key, value); } catch (_)
 const byId = (id) => state.people.find((p) => p.user_id === id);
 const nameOf = (id) => byId(id)?.name || "Someone";
 const minutesBetween = (a, b) => (+new Date(b) - +new Date(a)) / 60000;
+/** Someone's ranked tier (see rankedFor): worked out once when the crew loads, or here for anyone else. */
+const withRanked = (p) => { const ranked = rankedFor(p.days || {}); return { ...p, ranked, ranked_minutes: Math.round(ranked.average) }; };
+const rankedOf = (p) => p?.ranked || rankedFor(p?.days || {});
+const flairOf = (id) => state.flair.get(id) || {};
+/** Someone's emoji in its circle, inside the frame they wear. */
+const avatar = (p, extra = "") => h("span", { class: `avatar${extra ? ` ${extra}` : ""}`, dataset: flairOf(p?.user_id).frame ? { frame: flairOf(p.user_id).frame } : {}, "aria-hidden": "true" }, p?.emoji || "👤");
+/** Their name, in the colour they wear. */
+const nameIn = (p, tag = "span", name = p.name) => h(tag, { class: "who-name", dataset: flairOf(p.user_id).color ? { color: flairOf(p.user_id).color } : {} }, name);
+/** A tier's emblem. Next to a name it's left out for someone unranked. */
+const gem = (tier, extra = "") => h("i", { class: `gem${extra ? ` ${extra}` : ""}`, dataset: { tier: tier?.id || "none" }, role: "img", title: tier ? `${tier.name} tier` : "Unranked", "aria-label": tier ? `${tier.name} tier` : "Unranked" });
+const gemOf = (p) => { const tier = rankedOf(p).tier; return tier ? gem(tier) : null; };
+/** What's been seen on this device, by its newest id: "pings", "gifts" or "cheers". */
+const seenOf = (what) => Number(readStored(`lockedin.${what}Seen.${state.user.id}`)) || 0;
 // Every time and date on screen is St Andrews time (TZ), wherever the phone is.
 const timeOf = (iso) => new Date(iso).toLocaleTimeString("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit" });
 const inviteLink = (code) => `${location.origin}${location.pathname}?join=${code}`;
@@ -367,8 +388,11 @@ async function loadCrews() {
 
 async function refresh() {
   const uid = state.user.id;
-  const seenPings = pingsSeen();
-  const [stats, live, feed, mine, keys, modules, watchers, recent, records, pings] = await Promise.all([
+  const seenPings = seenOf("pings");
+  const dayAgo = new Date(Date.now() - 86400000).toISOString();
+  // Like pings: what's newer than this device has seen, or the last day on a new device.
+  const unseen = (query, what) => (seenOf(what) ? query.gt("id", seenOf(what)) : query.gt("created_at", dayAgo)).order("id", { ascending: false }).limit(50);
+  const [stats, live, feed, mine, keys, modules, watchers, recent, records, pings, flair, wallet, gifts, cheers] = await Promise.all([
     db.rpc("room_stats", { p_tz: TZ }),
     // Yours and your crewmates', as the database allows: who's studying, who's on a break.
     db.from("live").select("user_id, session_id, subject, started_at, sitting_started_at, location, paused_at, paused_subject, banked_seconds, now_playing, checked_at, study_group"),
@@ -380,13 +404,23 @@ async function refresh() {
     db.from("messages").select("id, crew_id, user_id, created_at").order("created_at", { ascending: false }).limit(60),
     db.rpc("crew_badges", { p_tz: TZ }),
     // A new device looks back a day rather than through everything ever sent.
-    (seenPings ? db.from("pings").select(PING_COLUMNS).eq("to_user", uid).gt("id", seenPings) : db.from("pings").select(PING_COLUMNS).eq("to_user", uid).gt("created_at", new Date(Date.now() - 86400000).toISOString())).order("id", { ascending: false }).limit(50),
+    (seenPings ? db.from("pings").select(PING_COLUMNS).eq("to_user", uid).gt("id", seenPings) : db.from("pings").select(PING_COLUMNS).eq("to_user", uid).gt("created_at", dayAgo)).order("id", { ascending: false }).limit(50),
+    db.rpc("crew_flair"),
+    db.rpc("my_wallet"),
+    // Things given to you by someone else (or by someone who's since left).
+    unseen(db.from("items").select(GIFT_COLUMNS).eq("user_id", uid).or(`paid_by.is.null,paid_by.neq.${uid}`), "gifts"),
+    unseen(db.from("watch_cheers").select(CHEER_COLUMNS).eq("user_id", uid), "cheers"),
     loadCrews(),
   ]);
   if (MUSIC) db.rpc("my_music").then(({ data }) => { if (data) { const changed = JSON.stringify(data) !== JSON.stringify(state.music); state.music = data; if (changed && state.tab === "me") keepFocus(render); } });
   const failed = [stats, live, feed, mine, keys, modules, watchers, recent, records].find((r) => r.error);
   if (failed) return oops(failed.error, "Couldn't load your crew.");
-  state.people = stats.data || [];
+  state.people = (stats.data || []).map(withRanked);
+  // The extras never stop the app loading: without them people just look plain.
+  if (flair.data) state.flair = new Map(flair.data.map((row) => [row.user_id, row]));
+  if (wallet.data) state.wallet = wallet.data;
+  if (gifts.data) state.gifts = gifts.data;
+  if (cheers.data) state.cheers = cheers.data;
   state.liveRows = new Map((live.data || []).map((row) => [row.user_id, row]));
   const own = state.liveRows.get(uid);
   state.live = own?.started_at ? own : null;
@@ -399,6 +433,7 @@ async function refresh() {
   state.recent = recent.data || [];
   state.badgeFacts = new Map((records.data || []).map((row) => [row.user_id, row.facts]));
   announceBadges();
+  announceTier();
   state.modules = modules.data || [];
   if (pings.data) state.pings = pings.data;
   showPings();
@@ -517,6 +552,21 @@ function subscribe() {
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, ({ new: message }) => gotMessage(message))
     .on("postgres_changes", { event: "UPDATE", schema: "public", table: "messages" }, ({ new: message }) => changedMessage(message))
     .on("postgres_changes", { event: "DELETE", schema: "public", table: "messages" }, ({ old }) => lostMessage(old?.id))
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "reactions" }, ({ new: reaction }) => gotReaction(reaction))
+    .on("postgres_changes", { event: "DELETE", schema: "public", table: "reactions" }, ({ old }) => lostReaction(old))
+    // A gift for you, or a cheer from someone watching: it waits on the card like a hype.
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "items", filter: `user_id=eq.${state.user.id}` }, ({ new: gift }) => {
+      if (gift.paid_by === state.user.id) return;
+      if (document.hidden) notify(`🎁 ${byId(gift.paid_by)?.name || "Someone"} sent you ${giftLabel(gift.item)}!`);
+      state.gifts = [gift, ...state.gifts.filter((other) => other.id !== gift.id)];
+      showPings();
+      refreshSoon();
+    })
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "watch_cheers", filter: `user_id=eq.${state.user.id}` }, ({ new: cheer }) => {
+      if (document.hidden) notify(`${cheerEmoji(cheer.kind)} ${cheer.from_label} is cheering you on!`);
+      state.cheers = [cheer, ...state.cheers.filter((other) => other.id !== cheer.id)];
+      showPings();
+    })
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "pings", filter: `to_user=eq.${state.user.id}` }, ({ new: ping }) => {
       const who = byId(ping.from_user);
       // The card waits for them. A notification is for reaching them now, if they're elsewhere.
@@ -536,42 +586,59 @@ function subscribe() {
    ------------------------------------------------------------ */
 
 const PING_COLUMNS = "id, from_user, kind, created_at";
+const GIFT_COLUMNS = "id, item, kind, paid_by, created_at";
+const CHEER_COLUMNS = "id, from_label, kind, note, created_at";
 const pingCard = h("div", { class: "pings", role: "status", hidden: true });
 document.body.append(pingCard);
-const pingsSeen = () => Number(readStored(`lockedin.pingsSeen.${state.user.id}`)) || 0;
-// The newest one already cheered for on this page, so each only sets off the confetti once.
-let pingsCheered = 0;
+// The newest of each already cheered for on this page, so each only sets off the confetti once.
+let pingsCheered = "";
+
+const cheerEmoji = (kind) => CHEERS.find(([key]) => key === kind)?.[1] || "👏";
+const WEAR_WORDS = { frame: "frame", color: "name colour", tag: "tag" };
+/** "a ☕ Coffee", "the Ember frame". */
+function giftLabel(id) {
+  const item = shopItem(id);
+  if (!item) return "a gift";
+  return item.kind === "treat" ? `${item.icon} ${item.name}` : `the ${item.name} ${WEAR_WORDS[item.kind]}`;
+}
 
 function showPings() {
-  const seen = pingsSeen();
-  const waiting = state.pings.filter((ping) => ping.id > seen);
-  const lines = pingLines(waiting);
-  pingCard.hidden = !lines.length;
-  pingCard.replaceChildren(...(lines.length ? [
-    ...lines.map((line) => {
-      const who = byId(line.from_user);
+  const waiting = { pings: state.pings.filter((x) => x.id > seenOf("pings")), gifts: state.gifts.filter((x) => x.id > seenOf("gifts")), cheers: state.cheers.filter((x) => x.id > seenOf("cheers")) };
+  const line = (face, title, at, note = null) => ({ at, node: h("div", { class: "ping-line" },
+    face,
+    h("div", null, h("strong", null, title), note ? h("p", { class: "ping-note" }, note) : null, h("small", null, ago(at)))) });
+  const face = (who, fallback) => (who ? avatar(who) : h("span", { class: "avatar", "aria-hidden": "true" }, fallback));
+  const times = (count) => (count > 1 ? ` ×${count}` : "");
+  const lines = [
+    ...pingLines(waiting.pings).map((ping) => {
+      const who = byId(ping.from_user);
       const name = who?.name || "Someone";
-      return h("div", { class: "ping-line" },
-        h("span", { class: "avatar", "aria-hidden": "true" }, who?.emoji || "🔥"),
-        h("div", null,
-          h("strong", null, line.kind === "joining" ? `${name} is on the way 🏃` : `${name} hyped you${line.count > 1 ? ` ×${line.count}` : ""} 🔥`),
-          h("small", null, ago(line.last))));
+      return line(face(who, "🔥"), ping.kind === "joining" ? `${name} is on the way 🏃` : `${name} hyped you${times(ping.count)} 🔥`, ping.last);
     }),
-    h("button", { class: "btn btn-small", onclick: pingsRead }, "Got it"),
-  ] : []));
-  const newest = Math.max(0, ...waiting.map((ping) => ping.id));
+    ...groupedLines(waiting.gifts, (gift) => `${gift.paid_by}:${gift.item}`).map((gift) => {
+      const who = byId(gift.paid_by);
+      const worn = shopItem(gift.item)?.kind !== "treat";
+      return line(face(who, "🎁"), `${who?.name || "Someone"} sent you ${giftLabel(gift.item)}${times(gift.count)} 🎁`, gift.last, worn ? "Put it on in Me → Shop." : null);
+    }),
+    // A cheer with a note keeps its own line, so every note gets read.
+    ...groupedLines(waiting.cheers, (cheer) => `${cheer.from_label}:${cheer.kind}:${cheer.note ? cheer.id : ""}`).map((cheer) =>
+      line(face(null, cheerEmoji(cheer.kind)), `${cheer.from_label} sent you ${cheerEmoji(cheer.kind)}${times(cheer.count)}`, cheer.last, cheer.note ? `“${cheer.note}”` : null)),
+  ].sort((x, y) => +new Date(y.at) - +new Date(x.at));
+  pingCard.hidden = !lines.length;
+  pingCard.replaceChildren(...(lines.length ? [...lines.map((x) => x.node), h("button", { class: "btn btn-small", onclick: pingsRead }, "Got it")] : []));
+  const newest = ["pings", "gifts", "cheers"].map((what) => Math.max(0, ...waiting[what].map((x) => x.id))).join(":");
   // Only with someone there to see it: a hidden tab has it waiting for when they're back.
-  if (!lines.length || document.hidden || newest <= pingsCheered) return;
+  if (!lines.length || document.hidden || newest === pingsCheered) return;
   pingsCheered = newest;
-  confetti(["🔥", "🙌", "🔥", "✨"]);
+  confetti(waiting.gifts.length ? ["🎁", "🙌", "🔥", "✨"] : ["🔥", "🙌", "🔥", "✨"]);
   pingCard.classList.remove("pop");
   void pingCard.offsetWidth;
   pingCard.classList.add("pop");
 }
 
 function pingsRead() {
-  store(`lockedin.pingsSeen.${state.user.id}`, String(Math.max(pingsSeen(), ...state.pings.map((ping) => ping.id))));
-  state.pings = [];
+  for (const what of ["pings", "gifts", "cheers"]) store(`lockedin.${what}Seen.${state.user.id}`, String(Math.max(seenOf(what), ...state[what].map((x) => x.id))));
+  state.pings = []; state.gifts = []; state.cheers = [];
   showPings();
 }
 
@@ -697,8 +764,11 @@ async function celebrate(subject, minutes, levelBefore) {
   const after = levelProgress(byId(state.user.id)?.total_minutes || 0);
   if (minutes < 1) toast("Under a minute — not counted.");
   else if (after.level > levelBefore) { confetti(["⭐️", "🎉", "🏆", "✨"]); toast(`Level up! You're Level ${after.level} — ${after.title} 🏆`, { ms: 6000 }); }
-  else { if (minutes >= 25) confetti(); toast(`+${Math.round(minutes)} XP · ${hm(minutes)} ${subject ? `on ${subject}` : "this session"} 💪`); }
+  else { if (minutes >= 25) confetti(); toast(`+${Math.round(minutes)} XP${coinsFor(minutes) ? ` · 🪙 +${coinsFor(minutes)}` : ""} · ${hm(minutes)} ${subject ? `on ${subject}` : "this session"} 💪`); }
 }
+
+/** About what a stretch of study earns in coins (the database counts them from all your sessions together). */
+const coinsFor = (minutes) => Math.floor((minutes * COINS_PER_HOUR) / 60);
 
 /** Before saving 3+ hours in one go, look twice: a forgotten timer is how false records and badges happen. */
 function askIfAllOfIt(live, carryOn) {
@@ -949,8 +1019,9 @@ function render() {
     h("header", { class: "top" },
       h("div", { class: "brand" }, h("span", { class: "brand-lock", "aria-hidden": "true" }, "🔒"), "Locked In"),
       h("div", { class: "top-stats" },
+        h("button", { type: "button", class: "pill pill-tier", "aria-label": `${rankedOf(me).tier ? `${rankedOf(me).tier.name} tier` : "Unranked"}. See Ranked`, onclick: () => rankedSheet({ ...EMPTY_STATS, ...me, user_id: state.user.id }) }, gem(rankedOf(me).tier)),
         h("span", { class: "pill pill-flame", title: "Days in a row with 30+ minutes" }, "🔥 ", String(streak)),
-        h("button", { type: "button", class: "pill pill-level", title: level.title, "aria-label": `Level ${level.level}, ${level.title}. See all ranks`, onclick: () => ranksSheet({ ...EMPTY_STATS, ...me, user_id: state.user.id }) }, "Lv ", String(level.level)))),
+        h("button", { type: "button", class: "pill pill-level", title: level.title, "aria-label": `Level ${level.level}, ${level.title}. See all levels`, onclick: () => ranksSheet({ ...EMPTY_STATS, ...me, user_id: state.user.id }) }, "Lv ", String(level.level)))),
     h("main", null, (views[state.tab] || nowView)()),
     h("nav", { class: "tabs", "aria-label": "Sections" }, tab("now", "⏱️", "Now"), tab("board", "🏆", "Board"), tab("chat", "💬", "Chat"), tab("me", state.me.emoji, "Me")));
   tick();
@@ -1092,9 +1163,9 @@ async function sendPing(people, kind) {
 
 /** Their name, clock and module; `place` if it should be shown here. */
 const liveWho = (p, place) => personButton(p, "live-person",
-  h("span", { class: "avatar is-live", "aria-hidden": "true" }, p.emoji),
+  avatar(p, "is-live"),
   h("div", { class: "live-who" },
-    h("strong", null, p.name), " ", sittingClock({ started_at: p.live_started_at, banked_seconds: state.liveRows.get(p.user_id)?.banked_seconds }, "live-clock"),
+    nameIn(p, "strong"), gemOf(p), " ", sittingClock({ started_at: p.live_started_at, banked_seconds: state.liveRows.get(p.user_id)?.banked_seconds }, "live-clock"),
     h("p", null, p.live_subject, place ? ` · 📍 ${place}` : "")));
 
 function liveCard(p) {
@@ -1128,9 +1199,9 @@ function breakCard(row) {
   const p = byId(row.user_id);
   return h("article", { class: "card live-card break-card" },
     personButton(p, "live-person",
-      h("span", { class: "avatar", "aria-hidden": "true" }, p.emoji),
+      avatar(p),
       h("div", { class: "live-who" },
-        h("strong", null, p.name), " ", h("span", { class: "break-clock" }, "☕ ", h("span", { dataset: { since: row.paused_at } }, clock(Date.now() - +new Date(row.paused_at)))),
+        nameIn(p, "strong"), gemOf(p), " ", h("span", { class: "break-clock" }, "☕ ", h("span", { dataset: { since: row.paused_at } }, clock(Date.now() - +new Date(row.paused_at)))),
         h("p", null, `On a break from ${row.paused_subject} · ${hm(row.banked_seconds / 60)} so far`))));
 }
 
@@ -1164,6 +1235,16 @@ function markChatRead() {
   store(CHAT_READ_KEY, JSON.stringify(marks));
 }
 
+// A message with its reactions (the database only hands over reactions on messages you can read).
+let messageColumns = "id, crew_id, user_id, body, badges, created_at, reactions(user_id, kind)";
+/** Asks for messages with their reactions. A database that doesn't have reactions yet (PGRST200) is asked again without, so the chat still works. */
+async function messagesQuery(run) {
+  const result = await run(messageColumns);
+  if (result.error?.code !== "PGRST200" || !messageColumns.includes("reactions")) return result;
+  messageColumns = "id, crew_id, user_id, body, badges, created_at";
+  return run(messageColumns);
+}
+
 /** Opens the chat tab on a crew's conversation, loading it if it isn't already. */
 async function openChat(crewId = chatCrew()?.id) {
   if (crewId) store(CHAT_CREW_KEY, crewId);
@@ -1172,7 +1253,7 @@ async function openChat(crewId = chatCrew()?.id) {
   state.chat.jump = true;
   render();
   if (!crewId || (!fresh && state.chat.loaded)) return;
-  const { data, error } = await db.from("messages").select("id, crew_id, user_id, body, badges, created_at").eq("crew_id", crewId).order("created_at", { ascending: false }).limit(200);
+  const { data, error } = await messagesQuery((columns) => db.from("messages").select(columns).eq("crew_id", crewId).order("created_at", { ascending: false }).limit(200));
   if (state.chat.crew !== crewId) return;
   if (error) return oops(error, "Couldn't load the chat.");
   state.chat.messages = (data || []).reverse();
@@ -1218,10 +1299,60 @@ async function sendMessage() {
   if (!crew || !body) return;
   chatInput.value = "";
   growChatInput();
-  const { data, error } = await db.from("messages").insert({ crew_id: crew.id, body }).select("id, crew_id, user_id, body, badges, created_at").single();
+  const { data, error } = await messagesQuery((columns) => db.from("messages").insert({ crew_id: crew.id, body }).select(columns).single());
   if (error) { chatInput.value = body; growChatInput(); return oops(error, "That didn't send. Try again?"); }
   state.chat.jump = true;
   gotMessage(data);
+}
+
+/** Someone reacted (you, or live from the crew). Only the open conversation shows them. */
+function gotReaction(r) {
+  const m = r?.message_id && state.chat.messages.find((x) => x.id === r.message_id);
+  if (!m || (m.reactions || []).some((x) => x.user_id === r.user_id && x.kind === r.kind)) return;
+  m.reactions = [...(m.reactions || []), { user_id: r.user_id, kind: r.kind }];
+  if (state.tab === "chat") keepFocus(render);
+}
+
+function lostReaction(r) {
+  const m = r?.message_id && state.chat.messages.find((x) => x.id === r.message_id);
+  if (!m?.reactions?.some((x) => x.user_id === r.user_id && x.kind === r.kind)) return;
+  m.reactions = m.reactions.filter((x) => !(x.user_id === r.user_id && x.kind === r.kind));
+  if (state.tab === "chat") keepFocus(render);
+}
+
+/** Adds your reaction to a message, or takes it back if it's already there. */
+async function react(m, kind) {
+  const mine = { message_id: m.id, user_id: state.user.id, kind };
+  const had = (m.reactions || []).some((x) => x.user_id === mine.user_id && x.kind === kind);
+  const { error } = had
+    ? await db.from("reactions").delete().eq("message_id", m.id).eq("user_id", mine.user_id).eq("kind", kind)
+    : await db.from("reactions").insert({ message_id: m.id, kind });
+  // 23505: it's there already, from another device.
+  if (error && error.code !== "23505") return oops(error);
+  (had ? lostReaction : gotReaction)(mine);
+}
+
+/** The reactions under a message: tap one to add yours or take it back. */
+function reactionRow(m) {
+  const chips = reactionChips(m.reactions, state.user.id);
+  if (!chips.length) return null;
+  return h("div", { class: "reacts" }, chips.map((chip) => h("button", { type: "button", class: "react-chip", "aria-pressed": String(chip.mine),
+    "aria-label": `${chip.emoji} from ${listNames(chip.who.map((id) => (id === state.user.id ? "you" : nameOf(id))))}`, onclick: (ev) => { ev.stopPropagation(); react(m, chip.kind); } },
+    chip.emoji, h("b", null, String(chip.count)))));
+}
+
+/** Tap a message: react to it, see who has, or delete it if it's yours. */
+function messageSheet(m) {
+  const mine = m.user_id === state.user.id;
+  const chips = reactionChips(m.reactions, state.user.id);
+  sheet((box, close) => box.append(
+    h("h2", null, "React"),
+    h("div", { class: "react-row", role: "group", "aria-label": "React to this message" }, REACTIONS.map(([kind, emoji]) =>
+      h("button", { type: "button", class: "react-pick", "aria-pressed": String(chips.some((chip) => chip.kind === kind && chip.mine)), "aria-label": kind, onclick: () => { close(); react(m, kind); } }, emoji))),
+    chips.length ? h("div", { class: "react-who" }, chips.map((chip) => h("p", null, h("span", { "aria-hidden": "true" }, chip.emoji), " ", listNames(chip.who.map((id) => (id === state.user.id ? "You" : nameOf(id))))))) : null,
+    h("div", { class: "btn-row" },
+      mine ? h("button", { class: "btn btn-soft", style: { color: "var(--danger)" }, onclick: () => { close(); deleteMessage(m); } }, "Delete") : null,
+      h("button", { class: "btn btn-soft", onclick: close }, "Close"))), { key: `message:${m.id}` });
 }
 
 async function deleteMessage(m) {
@@ -1242,18 +1373,20 @@ function messageText(m) {
   return won.length === 1 ? `earned ${badgeLabel(won[0])}` : `earned ${won.length} badges: ${won.map(badgeLabel).join(", ")}`;
 }
 
-/** "Leonardo earned 👻 3am Club": the database posts these when someone earns badges. Yours you can delete. */
+/** "Leonardo earned 👻 3am Club": the database posts these when someone earns badges. Tap to react; yours you can delete. */
 function badgeNews(m) {
   const who = byId(m.user_id);
   const mine = m.user_id === state.user.id;
   const won = newsBadges(m);
-  return h(mine ? "button" : "div", { class: "chat-news", ...(mine ? { type: "button", title: "Delete", onclick: () => deleteMessage(m) } : {}) },
-    h("span", { class: "chat-news-badge", "aria-hidden": "true" }, won.length === 1 ? (won[0].secret ? "❓" : won[0].icon) : "🏅"),
-    h("div", null,
-      h("p", null, h("strong", null, `${who?.emoji || ""} ${mine ? "You" : who?.name || "Someone who left"}`.trim()),
-        won.length === 1 ? ` earned ${won[0].secret ? "a secret badge 🤫" : won[0].name}` : ` earned ${won.length || "a"} ${won.length === 1 ? "badge" : "badges"}`),
-      h("small", null, won.length === 1 ? (won[0].secret ? "What could it be?" : won[0].detail) : won.map(badgeLabel).join(" · ")),
-      h("time", { datetime: m.created_at }, timeOf(m.created_at))));
+  return h("div", { class: "chat-news-wrap" },
+    h("button", { type: "button", class: "chat-news", title: "React", onclick: () => messageSheet(m) },
+      h("span", { class: "chat-news-badge", "aria-hidden": "true" }, won.length === 1 ? (won[0].secret ? "❓" : won[0].icon) : "🏅"),
+      h("div", null,
+        h("p", null, h("strong", null, `${who?.emoji || ""} ${mine ? "You" : who?.name || "Someone who left"}`.trim()),
+          won.length === 1 ? ` earned ${won[0].secret ? "a secret badge 🤫" : won[0].name}` : ` earned ${won.length || "a"} ${won.length === 1 ? "badge" : "badges"}`),
+        h("small", null, won.length === 1 ? (won[0].secret ? "What could it be?" : won[0].detail) : won.map(badgeLabel).join(" · ")),
+        h("time", { datetime: m.created_at }, timeOf(m.created_at)))),
+    reactionRow(m));
 }
 
 /** Links in a message, and only http(s) ones, become tappable; everything else stays plain text. */
@@ -1272,7 +1405,7 @@ function chatView() {
   if (state.chat.crew !== crew.id) { queueMicrotask(() => openChat(crew.id)); }
   const marks = chatReadMarks();
   const picker = state.crews.length > 1
-    ? h("div", { class: "chips chat-crews", role: "group", "aria-label": "Crew" }, state.crews.map((c) => {
+    ? h("div", { class: "chips chat-crews", role: "group", "aria-label": "Your crews' chats" }, state.crews.map((c) => {
       const n = c.id === crew.id ? 0 : unreadIn(c.id, marks);
       return h("button", { type: "button", class: "chip", "aria-pressed": String(c.id === crew.id), onclick: () => openChat(c.id) }, c.name, n ? h("b", { class: "chip-count" }, n > 9 ? "9+" : String(n)) : null);
     }))
@@ -1289,10 +1422,15 @@ function chatView() {
     const who = byId(m.user_id);
     lines.push(h("div", { class: `msg${mine ? " is-mine" : ""}${together ? " is-cont" : ""}` },
       mine ? null : h("span", { class: `msg-avatar${together ? " is-blank" : ""}`, "aria-hidden": "true" }, who?.emoji || "👤"),
-      h(mine ? "button" : "div", { class: "msg-bubble", ...(mine ? { type: "button", title: "Delete", onclick: () => deleteMessage(m) } : {}) },
-        mine || together ? null : h("strong", null, who?.name || "Someone who left"),
-        h("p", null, ...linkify(m.body)),
-        h("time", { datetime: m.created_at }, timeOf(m.created_at)))));
+      h("div", { class: "msg-col" },
+        // Tap a message to react to it (a link in it still opens).
+        h("div", { class: "msg-bubble", role: "button", tabindex: "0", "aria-label": `${mine ? "Your message" : `Message from ${who?.name || "someone who left"}`}. React`,
+          onclick: (ev) => { if (!ev.target.closest("a")) messageSheet(m); },
+          onkeydown: (ev) => { if ((ev.key === "Enter" || ev.key === " ") && ev.target === ev.currentTarget) { ev.preventDefault(); messageSheet(m); } } },
+          mine || together ? null : (who ? h("strong", null, nameIn(who), gemOf(who)) : h("strong", null, "Someone who left")),
+          h("p", null, ...linkify(m.body)),
+          h("time", { datetime: m.created_at }, timeOf(m.created_at))),
+        reactionRow(m))));
     lastDay = day; lastSender = m.user_id; lastAt = +new Date(m.created_at);
   }
   return [
@@ -1315,7 +1453,9 @@ const composer = h("form", { class: "composer", hidden: true, onsubmit: (ev) => 
   chatInput, h("button", { class: "btn composer-send", type: "submit", "aria-label": "Send" }, "➤"));
 document.body.append(composer);
 
-const BOARDS = { today: { label: "Today", key: "today_minutes", period: "day", total: "today" }, week: { label: "This week", key: "week_minutes", period: "week", total: "this week" }, all: { label: "All time", key: "total_minutes" } };
+const BOARDS = { today: { label: "Today", key: "today_minutes", period: "day", total: "today" }, week: { label: "This week", key: "week_minutes", period: "week", total: "this week" }, all: { label: "All time", key: "total_minutes" },
+  // The ranked board: everyone's average week, which is what their tier comes from.
+  ranked: { label: "Ranked", key: "ranked_minutes", ranked: true } };
 
 function boardView() {
   const board = BOARDS[state.board] || BOARDS.week;
@@ -1324,10 +1464,12 @@ function boardView() {
   const crewTotal = ranked.reduce((sum, p) => sum + p[key], 0);
   // An empty day is an open race, not a tie between everybody.
   const who = state.watching && byId(state.user.id)?.name;
-  const chase = crewTotal ? chaseLine(ranked, state.user.id, key, who) : board.period === "day" ? `Nobody's on the board today yet.${who ? "" : " Lock in to take first."}` : null;
+  const chase = board.ranked ? null : crewTotal ? chaseLine(ranked, state.user.id, key, who) : board.period === "day" ? `Nobody's on the board today yet.${who ? "" : " Lock in to take first."}` : null;
+  // The ranked board shows an average week, not a total.
+  const time = (minutes) => (board.ranked ? `${weekHours(minutes)}/wk` : hm(minutes));
   const leader = Math.max(1, ...ranked.map((p) => p[key]));
   const spot = (p, place) => p
-    ? personButton(p, `podium-spot ${place}`, h("span", { class: `avatar${p.live_started_at ? " is-live" : ""}` }, p.emoji), h("span", { class: "podium-name" }, p.name), h("span", { class: "podium-time" }, hm(p[key])),
+    ? personButton(p, `podium-spot ${place}`, avatar(p, p.live_started_at ? "is-live" : ""), h("span", { class: "podium-name" }, nameIn(p)), h("span", { class: "podium-time" }, time(p[key])),
       h("div", { class: "podium-block" }, place === "first" ? "1" : place === "second" ? "2" : "3"))
     : h("div", { class: `podium-spot ${place} empty-spot` }, h("span", { class: "avatar" }, "?"), h("span", { class: "podium-name" }, "—"), h("div", { class: "podium-block" }));
   return [
@@ -1335,22 +1477,23 @@ function boardView() {
       h("div", { class: "board-head" },
         h("div", { class: "toggle", role: "group", "aria-label": "Period" },
           ...Object.entries(BOARDS).map(([k, b]) => h("button", { "aria-pressed": String(board === b), onclick: () => { state.board = k; store(BOARD_KEY, k); repaint(); } }, b.label))),
-        h("span", { class: "reset" }, board.period ? `Resets in ${untilReset(new Date(), board.period)}` : `${hm(crewTotal)} together`)),
+        h("span", { class: "reset" }, board.ranked ? `${RANKED_WEEKS}-week average` : board.period ? `Resets in ${untilReset(new Date(), board.period)}` : `${hm(crewTotal)} together`)),
       h("div", { class: "podium" }, spot(ranked[1], "second"), spot(ranked[0], "first"), spot(ranked[2], "third")),
       chase ? h("div", { class: "chase" }, h("span", { "aria-hidden": "true" }, "🎯"), h("span", null, chase)) : null,
       h("ol", { class: "ranks" }, ranked.map((p) => h("li", null, personButton(p, `rank-row${p.user_id === state.user.id ? " is-me" : ""}`,
         h("span", { class: "rank-num" }, String(p.rank)),
-        h("span", { class: `avatar${p.live_started_at ? " is-live" : ""}`, "aria-hidden": "true" }, p.emoji),
+        avatar(p, p.live_started_at ? "is-live" : ""),
         h("div", { class: "rank-main" },
-          h("strong", null, h("span", null, p.name), p.live_started_at ? h("i", { class: "live-dot", title: "Locked in now" }) : null, p.streak ? h("em", { class: "flame" }, `🔥${p.streak}`) : null),
+          h("strong", null, nameIn(p), gemOf(p), p.live_started_at ? h("i", { class: "live-dot", title: "Locked in now" }) : null, p.streak ? h("em", { class: "flame" }, `🔥${p.streak}`) : null),
           h("div", { class: "rank-bar" }, h("span", { style: { width: `${Math.max(3, (p[key] / leader) * 100)}%` } }))),
-        h("span", { class: "rank-time" }, hm(p[key]))))))),
+        h("span", { class: "rank-time" }, time(p[key]))))))),
     board.total ? h("p", { class: "small muted", style: { textAlign: "center", margin: "12px 0 0" } }, `Crew total ${board.total}: ${hm(crewTotal)}`) : null,
+    board.ranked ? h("p", { class: "small muted", style: { textAlign: "center", margin: "12px 8px 0" } }, `Average hours a week over the last ${RANKED_WEEKS} weeks. It sets your tier, and it moves both ways.`) : null,
     h("section", { class: "section" },
       h("div", { class: "section-head" }, h("h2", null, "Recent sessions")),
       h("div", { class: "card" }, state.feed.length ? state.feed.map((s) => {
         const p = byId(s.user_id);
-        return (p ? (...kids) => personButton(p, "feed-row", ...kids) : (...kids) => h("div", { class: "feed-row" }, ...kids))(h("span", { class: "avatar", "aria-hidden": "true" }, p?.emoji || "📚"),
+        return (p ? (...kids) => personButton(p, "feed-row", ...kids) : (...kids) => h("div", { class: "feed-row" }, ...kids))(p ? avatar(p) : h("span", { class: "avatar", "aria-hidden": "true" }, "📚"),
           h("div", null, h("p", null, `${p?.name || "Someone"} · ${s.subject}`), h("small", null, [s.location ? `📍 ${s.location}` : null, ago(s.ended_at)].filter(Boolean).join(" · "))),
           h("span", { class: "feed-time" }, hm(minutesBetween(s.started_at, s.ended_at))));
       }) : h("p", { class: "empty" }, "Finished sessions show up here."))),
@@ -1405,10 +1548,20 @@ function heroCard(person) {
   const streak = streakFrom(person.days);
   const level = levelProgress(person.total_minutes);
   const rank = standings(state.people, "week_minutes").find((p) => p.user_id === person.user_id)?.rank;
+  const ranked = rankedOf(person);
+  const flair = flairOf(person.user_id);
+  const tag = shopItem(flair.tag);
+  const you = person.user_id === state.user.id && !state.watching;
+  const treats = SHOP.filter((x) => x.kind === "treat" && flair.treats?.[x.id]);
   return h("section", { class: "card hero" },
-    h("span", { class: `avatar avatar-big${person.live_started_at ? " is-live" : ""}` }, person.emoji),
-    h("h2", null, person.name),
-    h("button", { type: "button", class: "hero-title", "aria-label": `Level ${level.level}, ${level.title}. See all ranks`, onclick: () => ranksSheet(person) }, `Level ${level.level} · ${level.title}`, h("span", { "aria-hidden": "true" }, " ›")),
+    // The banner is their tier: it changes as their average week does.
+    h("button", { type: "button", class: "hero-banner", dataset: { tier: ranked.tier?.id || "none" }, "aria-label": `${ranked.tier ? `${ranked.tier.name} tier, ${weekHours(ranked.average)} a week` : "Unranked"}. See Ranked`, onclick: () => rankedSheet(person) },
+      h("span", { class: "hero-banner-tier" }, gem(ranked.tier, "gem-big"), ranked.tier ? ranked.tier.name : "Unranked"),
+      h("span", { class: "hero-banner-rate" }, ranked.tier ? `${weekHours(ranked.average)} a week` : "Study to get placed", h("span", { "aria-hidden": "true" }, " ›"))),
+    avatar(person, `avatar-big${person.live_started_at ? " is-live" : ""}`),
+    nameIn(person, "h2"),
+    tag ? h("p", { class: "hero-tag" }, `${tag.icon} ${tag.name}`) : null,
+    h("button", { type: "button", class: "hero-title", "aria-label": `Level ${level.level}, ${level.title}. See all levels`, onclick: () => ranksSheet(person) }, `Level ${level.level} · ${level.title}`, h("span", { "aria-hidden": "true" }, " ›")),
     person.live_started_at ? h("p", { class: "hero-live" }, "🔒 Locked in on ", h("b", null, person.live_subject), person.live_location ? ` at ${person.live_location}` : "") : null,
     h("div", { class: "xp" },
       h("div", { class: "xp-top" }, h("span", null, `${Math.round(person.total_minutes)} XP`), h("span", null, `${hm(level.toNext)} to Level ${level.level + 1}`)),
@@ -1416,7 +1569,189 @@ function heroCard(person) {
     h("div", { class: "hero-stats" },
       h("div", null, h("strong", null, hm(person.week_minutes)), h("span", null, rank && state.people.length > 1 ? `This week · #${rank}` : "This week")),
       h("div", null, h("strong", null, `🔥 ${streak}`), h("span", null, "Day streak")),
-      h("div", null, h("strong", null, hm(person.total_minutes)), h("span", null, "All time"))));
+      h("div", null, h("strong", null, hm(person.total_minutes)), h("span", null, "All time"))),
+    treats.length ? h("div", { class: "treats", role: "group", "aria-label": "Gifts from the crew" },
+      h("span", { class: "label" }, "Gifts"),
+      treats.map((t) => h("span", { class: "treat", title: t.name, "aria-label": `${t.name} × ${flair.treats[t.id]}` }, t.icon, flair.treats[t.id] > 1 ? h("b", null, `×${flair.treats[t.id]}`) : null))) : null,
+    you ? h("div", { class: "hero-shop" },
+      h("div", null, h("strong", null, `🪙 ${Math.max(0, state.wallet.coins)} coins`), h("small", null, `${COINS_PER_HOUR} for every hour you study`)),
+      h("button", { class: "btn btn-small btn-gold", onclick: () => shopSheet() }, "Shop")) : null,
+    !you && !state.watching ? h("button", { class: "btn btn-small btn-soft hero-gift", onclick: () => giftSheet(person) }, "🎁 Send a gift") : null);
+}
+
+/* ------------------------------------------------------------
+   Ranked: a tier that follows your average week (rankedFor). The
+   level ladder only climbs; this one moves both ways.
+   ------------------------------------------------------------ */
+
+/** Every tier, the top one first, and where someone stands. It opens on where they are now. */
+function rankedSheet(person) {
+  hideTip();
+  const you = person.user_id === state.user.id && !state.watching;
+  const r = rankedOf(person);
+  let here = null;
+  const row = (tier) => {
+    const status = !r.tier || tier.index > r.tier.index ? "ahead" : tier.index === r.tier.index ? "current" : "passed";
+    const current = status === "current";
+    const node = h("li", { class: `rung is-${status}`, "aria-current": current ? "step" : null },
+      h("span", { class: "rung-icon", "aria-hidden": "true" }, gem(tier, "gem-big")),
+      h("div", null,
+        current ? h("span", { class: "label rung-here" }, you ? "You're here" : `${person.name} is here`) : null,
+        h("strong", null, tier.name),
+        h("small", null, current
+          ? (r.next ? `${hm(r.toNext)} more study to reach ${r.next.name}` : "The top tier")
+          : tier.hours ? `${tier.hours}h+ a week` : `Any study in the last ${RANKED_WEEKS} weeks`),
+        current && r.next ? h("div", { class: "xp-bar", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(Math.round(r.ratio * 100)) }, h("span", { style: { width: `${Math.max(2, r.ratio * 100)}%` } })) : null));
+    if (current) here = node;
+    return node;
+  };
+  const over = r.weeks < RANKED_WEEKS ? (r.weeks === 1 ? "in the first week" : `over the first ${r.weeks} weeks`) : `over the last ${RANKED_WEEKS} weeks`;
+  const summary = r.tier
+    ? `${you ? "You're" : `${person.name} is`} averaging ${weekHours(r.average)} a week ${over}.`
+    : `${you ? "You haven't" : `${person.name} hasn't`} studied in the last ${RANKED_WEEKS} weeks. One session gets ${you ? "you" : "them"} placed.`;
+  let inner = null;
+  sheet((box, close) => {
+    inner = box;
+    box.append(
+      h("div", { class: "sheet-top" }, h("button", { class: "link", onclick: close }, "Close")),
+      h("h2", null, "Ranked"),
+      h("p", { class: "muted", style: { marginTop: "6px" } }, summary),
+      h("p", { class: "small muted", style: { marginTop: "6px" } }, `Your tier follows your average hours a week, so it moves both ways: study more and you're promoted, ease off and you drop. Levels never go down. This does.`),
+      h("ol", { class: "ladder", reversed: true }, [...TIERS].reverse().map(row)));
+  }, { key: "ranked" });
+  if (inner && here) inner.scrollTop += here.getBoundingClientRect().top - inner.getBoundingClientRect().top - (inner.clientHeight - here.offsetHeight) / 2;
+}
+
+/** A change of tier since this device last looked. The first time, just say where they've been placed. */
+function announceTier() {
+  const me = byId(state.user.id);
+  if (!me) return;
+  const r = rankedOf(me);
+  const key = `lockedin.tier.${state.user.id}`;
+  const now = r.tier ? r.tier.index : -1;
+  const before = readStored(key);
+  store(key, String(now));
+  if (before === null) {
+    if (r.tier) toast(`New: Ranked. Your average week puts you in ${r.tier.name}. Tap your banner in Me to see the tiers.`, { ms: 8000 });
+    return;
+  }
+  const move = tierMove(Number(before), now);
+  if (move === "up") {
+    confetti(["🎉", "⭐️", "🚀", "✨"]);
+    toast(Number(before) < 0 ? `You're placed in ${r.tier.name} 🎉` : `Promoted to ${r.tier.name}! 🎉`, { ms: 7000 });
+  } else if (move === "down") {
+    toast(r.tier ? `Dropped to ${r.tier.name}. ${hm(r.toNext)} more study gets ${r.next.name} back.` : "You've dropped out of the tiers. One session gets you placed again.", { ms: 7000 });
+  }
+}
+
+/* ------------------------------------------------------------
+   Coins and the shop. The database works out your coins from your
+   sessions and checks every purchase (shop_buy, shop_wear); this
+   only shows what there is and asks.
+   ------------------------------------------------------------ */
+
+async function reloadShop() {
+  const [wallet, flair] = await Promise.all([db.rpc("my_wallet"), db.rpc("crew_flair")]);
+  if (wallet.data) state.wallet = wallet.data;
+  if (flair.data) state.flair = new Map(flair.data.map((row) => [row.user_id, row]));
+}
+
+/** How far off something is: "You need 40 more coins, about 4h 00m of study." */
+const shortOf = (price) => `You need ${price - Math.max(0, state.wallet.coins)} more coins, about ${hm(((price - Math.max(0, state.wallet.coins)) * 60) / COINS_PER_HOUR)} of study.`;
+
+/** How an item looks on someone: a frame round their emoji, their name in a colour, a tag. */
+function itemPreview(item, person) {
+  if (item.kind === "frame") return h("span", { class: "avatar", dataset: { frame: item.id }, "aria-hidden": "true" }, person.emoji);
+  if (item.kind === "color") return h("strong", { class: "who-name shop-name", dataset: { color: item.id } }, person.name);
+  if (item.kind === "tag") return h("span", { class: "hero-tag" }, `${item.icon} ${item.name}`);
+  return h("b", { class: "shop-treat", "aria-hidden": "true" }, item.icon);
+}
+
+/** Your shop: buy things to wear, put them on, take them off. Gifts start from a friend's profile. */
+function shopSheet() {
+  const me = { user_id: state.user.id, name: state.me.name, emoji: state.me.emoji };
+  let busy = false;
+  sheet((box, close) => {
+    async function act(work) {
+      if (busy) return;
+      busy = true;
+      try { await work(); } finally { busy = false; }
+      if (box.isConnected) paint();
+      render();
+    }
+    const wear = (item, on) => act(async () => {
+      const { error } = await db.rpc("shop_wear", { p_slot: item.kind, p_item: on ? item.id : null });
+      if (error) return oops(error);
+      await reloadShop();
+    });
+    const buy = (item) => {
+      if (state.wallet.coins < item.price) return toast(shortOf(item.price), { bad: true, ms: 5000 });
+      if (!confirm(`Buy ${item.name} for ${item.price} coins?`)) return;
+      act(async () => {
+        const { error } = await db.rpc("shop_buy", { p_item: item.id });
+        if (error) return oops(error);
+        // Bought to be worn: put it straight on.
+        await db.rpc("shop_wear", { p_slot: item.kind, p_item: item.id });
+        await reloadShop();
+        confetti(["🪙", "✨", "🛍️", "✨"]);
+        toast(`${item.name} is yours, and on ✨`);
+      });
+    };
+    function paint() {
+      const flair = flairOf(state.user.id);
+      const owned = new Set(state.wallet.owned || []);
+      const tile = (item) => {
+        const wearing = flair[item.kind] === item.id;
+        return h("div", { class: `shop-item${wearing ? " is-on" : ""}` },
+          h("div", { class: "shop-preview" }, itemPreview(item, me)),
+          item.kind === "tag" ? null : h("span", { class: "shop-item-name" }, item.name),
+          wearing ? h("button", { type: "button", class: "btn btn-small btn-soft", onclick: () => wear(item, false) }, "Wearing ✓")
+            : owned.has(item.id) ? h("button", { type: "button", class: "btn btn-small", onclick: () => wear(item, true) }, "Wear")
+              : h("button", { type: "button", class: "btn btn-small btn-gold", "aria-label": `Buy ${item.name} for ${item.price} coins`, onclick: () => buy(item) }, `🪙 ${item.price}`));
+      };
+      box.replaceChildren(
+        h("div", { class: "sheet-top" }, h("button", { class: "link", onclick: close }, "Close")),
+        h("div", { class: "shop-head" }, h("h2", null, "Shop"), h("span", { class: "pill coins" }, `🪙 ${Math.max(0, state.wallet.coins)}`)),
+        h("p", { class: "muted", style: { marginTop: "6px" } }, `You earn ${COINS_PER_HOUR} coins for every hour you study. Your crew sees what you wear. To give something, open a friend's profile.`),
+        ...SHOP_KINDS.filter(([kind]) => kind !== "treat").map(([kind, label]) => h("div", { class: "shop-group" },
+          h("h3", null, label),
+          h("div", { class: `shop-grid shop-${kind}` }, SHOP.filter((item) => item.kind === kind).map(tile)))));
+    }
+    paint();
+  }, { key: "shop" });
+}
+
+/** Send a crewmate a treat, or something to wear. It reaches them like a hype, and treats stay on their profile. */
+function giftSheet(person) {
+  let busy = false;
+  sheet((box, close) => {
+    const send = async (item) => {
+      if (busy) return;
+      if (state.wallet.coins < item.price) return toast(shortOf(item.price), { bad: true, ms: 5000 });
+      if (!confirm(`Send ${person.name} ${giftLabel(item.id)} for ${item.price} coins?`)) return;
+      busy = true;
+      const { data, error } = await db.rpc("shop_buy", { p_item: item.id, p_for: person.user_id });
+      busy = false;
+      if (error) return oops(error);
+      state.wallet = { ...state.wallet, coins: data.coins };
+      close();
+      confetti(["🎁", item.icon || "✨", "✨"]);
+      toast(`Sent ${person.name} ${giftLabel(item.id)} 🎁`);
+      refreshSoon();
+    };
+    const tile = (item) => h("button", { type: "button", class: "shop-item gift-item", "aria-label": `${item.name}, ${item.price} coins`, onclick: () => send(item) },
+      h("div", { class: "shop-preview" }, itemPreview(item, person)),
+      item.kind === "tag" ? null : h("span", { class: "shop-item-name" }, item.name),
+      h("span", { class: "gift-price" }, `🪙 ${item.price}`));
+    box.append(
+      h("div", { class: "sheet-top" }, h("button", { class: "link", onclick: close }, "Close")),
+      h("div", { class: "shop-head" }, h("h2", null, `A gift for ${person.name} 🎁`), h("span", { class: "pill coins" }, `🪙 ${Math.max(0, state.wallet.coins)}`)),
+      h("p", { class: "muted", style: { marginTop: "6px" } }, `${person.name} sees it straight away. Treats stay on their profile.`),
+      // Treats first: they're what a gift usually is.
+      ...[SHOP_KINDS.at(-1), ...SHOP_KINDS.slice(0, -1)].map(([kind, label]) => h("div", { class: "shop-group" },
+        h("h3", null, kind === "treat" ? label : `${label}, for them to wear`),
+        h("div", { class: `shop-grid shop-${kind}` }, SHOP.filter((item) => item.kind === kind).map(tile)))));
+  }, { key: `gift:${person.user_id}` });
 }
 
 /** Every rank, the top one first, and how far up someone has climbed. It opens on where they are now. */
@@ -1451,7 +1786,7 @@ function ranksSheet(person) {
     inner = box;
     box.append(
       h("div", { class: "sheet-top" }, h("button", { class: "link", onclick: close }, "Close")),
-      h("h2", null, "Ranks"),
+      h("h2", null, "Levels"),
       h("p", { class: "muted", style: { marginTop: "6px" } }, summary),
       h("ol", { class: "ladder", reversed: true }, [...ranks].reverse().map(row)));
   }, { key: "ranks" });
@@ -1826,6 +2161,7 @@ async function stopWatchLink(w) {
 
 /** The page a watch link opens: one person, read-only, checking in every minute. */
 async function watchPage(token) {
+  state.watchToken = token;
   // Added to a phone's home screen, this page should open again, not the app's sign-up.
   document.querySelector('link[rel="manifest"]')?.remove();
   let shown = false;
@@ -1851,7 +2187,8 @@ const WATCH_TAB_KEY = "lockedin.watchTab";
 function paintWatch(data) {
   state.watching = data;
   state.user = { id: data.me };
-  state.people = data.people;
+  state.people = data.people.map(withRanked);
+  state.flair = new Map((data.flair || []).map((row) => [row.user_id, row]));
   state.liveRows = new Map(data.live.map((row) => [row.user_id, row]));
   state.breaks = data.live.filter((row) => !row.started_at && row.paused_at && byId(row.user_id));
   state.feed = data.feed;
@@ -1890,6 +2227,7 @@ function watchPerson(who, { sessions, modules }) {
       !row?.paused_at && last ? h("small", null, `Last: ${last.subject}, ${new Date(last.ended_at).toLocaleDateString("en-GB", { timeZone: TZ, weekday: "short", day: "numeric", month: "short" })} ${timeOf(last.started_at)}–${timeOf(last.ended_at)}${last.location ? ` · 📍 ${last.location}` : ""}`) : null);
   return [
     status,
+    cheerCard(who),
     heroCard(who),
     activityCard(who, sessions, "Activity"),
     moduleSplit(modules || [], who.name),
@@ -1897,6 +2235,32 @@ function watchPerson(who, { sessions, modules }) {
     recentSessions(sessions, who.name, 10),
     h("p", { class: "small muted watch-note" }, `${who.name} shared this page with you. It keeps itself up to date, and ${who.name} can turn the link off at any time.`),
   ];
+}
+
+/* Someone watching can cheer the person on: an emoji, and a note if they like. It reaches them like a hype
+   (watch_cheer). Made once and kept, so the page updating itself every minute doesn't wipe a half-written note. */
+let cheerNode = null;
+function cheerCard(who) {
+  if (cheerNode) return cheerNode;
+  const note = h("input", { id: "cheer-note", class: "input", maxlength: 140, placeholder: "Add a note (optional)", autocomplete: "off", "aria-label": "A note to go with it" });
+  let busy = false;
+  const send = async (kind, emoji) => {
+    if (busy) return;
+    busy = true;
+    const { error } = await db.rpc("watch_cheer", { p_token: state.watchToken, p_kind: kind, p_note: note.value.trim() || null });
+    busy = false;
+    if (error) return oops(error);
+    note.value = "";
+    confetti([emoji, "✨", emoji]);
+    toast(`Sent ${emoji} to ${who.name}`);
+  };
+  cheerNode = h("section", { class: "card cheer-card" },
+    h("h2", null, `Cheer ${who.name} on`),
+    h("p", { class: "small muted" }, `Tap one and ${who.name} gets it straight away${state.watching?.label ? `, from “${state.watching.label}”` : ""}.`),
+    h("div", { class: "cheer-row", role: "group", "aria-label": "Send a cheer" }, CHEERS.map(([kind, emoji]) =>
+      h("button", { type: "button", class: "react-pick", "aria-label": `Send ${emoji}`, onclick: () => send(kind, emoji) }, emoji))),
+    note);
+  return cheerNode;
 }
 
 /** Everyone in the crew: who's studying right now, and the board. */

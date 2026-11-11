@@ -321,3 +321,104 @@ export function ago(iso, now = new Date()) {
 
 /** A linked app's connection as one pasteable code: project URL, publishable key and link key. */
 export const encodeLinkCode = ({ url, key, link }) => btoa(JSON.stringify({ u: url, k: key, l: link })).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+/* Ranked. Beside your level (which only ever climbs) sits a tier that follows
+   how much you study now: your average hours a week over the last four weeks.
+   Study more and you're promoted; ease off and you drop. Someone who started
+   under four weeks ago is averaged over the weeks they've had. */
+export const RANKED_WEEKS = 4;
+export const TIERS = [
+  ["bronze", "Bronze", 0], ["silver", "Silver", 3], ["gold", "Gold", 6], ["platinum", "Platinum", 10],
+  ["diamond", "Diamond", 15], ["master", "Master", 20], ["titan", "Titan", 27], ["mythic", "Mythic", 35],
+].map(([id, name, hours], index) => ({ id, name, hours, index, minutes: hours * 60 }));
+
+const dayNumber = (key) => { const [y, m, d] = key.split("-").map(Number); return Date.UTC(y, m - 1, d) / 86400000; };
+
+/** Someone's tier from their daily minutes (`days`, as room_stats gives them). `tier` is null until they've
+    studied in the window; `toNext` is how much more study, in minutes, lifts the average to the next tier. */
+export function rankedFor(days = {}, now = new Date()) {
+  const today = dayNumber(ukDay(now));
+  let total = 0, first = null;
+  for (const [key, minutes] of Object.entries(days)) {
+    const day = dayNumber(key);
+    if (!(minutes > 0) || day > today) continue;
+    if (first === null || day < first) first = day;
+    if (day > today - RANKED_WEEKS * 7) total += minutes;
+  }
+  const weeks = first === null ? 1 : Math.min(RANKED_WEEKS, Math.max(1, Math.ceil((today - first + 1) / 7)));
+  const average = total / weeks;
+  const tier = total ? TIERS.findLast((t) => average >= t.minutes) : null;
+  const next = tier ? TIERS[tier.index + 1] || null : TIERS[0];
+  const from = tier ? tier.minutes : 0;
+  return {
+    tier, next, weeks, total, average,
+    toNext: !tier ? 1 : next ? Math.max(1, Math.ceil(next.minutes * weeks - total)) : 0,
+    ratio: tier && next ? Math.min(1, (average - from) / (next.minutes - from)) : tier ? 1 : 0,
+  };
+}
+
+/** "12.4h" — an average week, for "12.4h a week". */
+export const weekHours = (minutes) => `${(minutes / 60).toFixed(1).replace(/\.0$/, "")}h`;
+
+/** What a change of tier is: "up", "down" or null. `before` and `after` are tier indexes, -1 for unranked. */
+export const tierMove = (before, after) => (after > before ? "up" : after < before ? "down" : null);
+
+/* Coins and the shop. Ten coins an hour, worked out by the database from saved
+   sessions (private.coins_of), and spent on things to wear or on gifts for a
+   crewmate. `id`, `kind` and `price` mirror private.shop_items. */
+export const COINS_PER_HOUR = 10;
+export const SHOP_KINDS = [["frame", "Avatar frames"], ["color", "Name colours"], ["tag", "Tags"], ["treat", "Treats"]];
+const item = (id, kind, price, name, icon = null) => ({ id, kind, price, name, icon });
+export const SHOP = [
+  item("ember", "frame", 120, "Ember"),
+  item("frost", "frame", 120, "Frost"),
+  item("neon", "frame", 180, "Neon"),
+  item("royal", "frame", 250, "Royal"),
+  item("prism", "frame", 350, "Prism"),
+  item("coral", "color", 60, "Coral"),
+  item("ocean", "color", 60, "Ocean"),
+  item("mint", "color", 60, "Mint"),
+  item("grape", "color", 60, "Grape"),
+  item("sunset", "color", 150, "Sunset"),
+  item("aurora", "color", 200, "Aurora"),
+  item("coffee-run", "tag", 40, "Runs on coffee", "☕"),
+  item("night-shift", "tag", 40, "Night shift", "🌙"),
+  item("bookworm", "tag", 40, "Bookworm", "📖"),
+  item("zen", "tag", 60, "Zen mode", "🧘"),
+  item("built-different", "tag", 80, "Built different", "🚀"),
+  item("main-character", "tag", 120, "Main character", "👑"),
+  item("coffee", "treat", 10, "Coffee", "☕"),
+  item("cookie", "treat", 10, "Cookie", "🍪"),
+  item("pizza", "treat", 20, "Pizza", "🍕"),
+  item("energy", "treat", 20, "Energy drink", "⚡️"),
+  item("rose", "treat", 30, "Rose", "🌹"),
+  item("trophy", "treat", 50, "Trophy", "🏆"),
+];
+export const shopItem = (id) => SHOP.find((x) => x.id === id) || null;
+
+/** What a message can be given in the chat; the database keeps the key (public.reactions.kind). */
+export const REACTIONS = [["heart", "❤️"], ["fire", "🔥"], ["laugh", "😂"], ["clap", "👏"], ["strong", "💪"], ["wow", "😮"]];
+/** What someone watching can send (public.watch_cheers.kind). */
+export const CHEERS = [["heart", "❤️"], ["clap", "👏"], ["strong", "💪"], ["fire", "🔥"], ["star", "⭐️"]];
+
+/** A message's reactions as chips: one per kind in REACTIONS' order, with how many and whether one is yours. */
+export function reactionChips(reactions = [], meId = null) {
+  return REACTIONS.map(([kind, emoji]) => {
+    const of = reactions.filter((r) => r.kind === kind);
+    return { kind, emoji, count: of.length, mine: of.some((r) => r.user_id === meId), who: of.map((r) => r.user_id) };
+  }).filter((chip) => chip.count);
+}
+
+/** Things waiting to be seen that aren't pings: gifts and watchers' cheers, one line per sender and thing.
+    A cheer with a note keeps its own line, so the note is read. `key(row)` names the group; newest first. */
+export function groupedLines(rows = [], key) {
+  const lines = new Map();
+  for (const row of rows) {
+    const k = key(row);
+    const line = lines.get(k) || { ...row, count: 0, last: row.created_at };
+    line.count++;
+    if (+new Date(row.created_at) > +new Date(line.last)) line.last = row.created_at;
+    lines.set(k, line);
+  }
+  return [...lines.values()].sort((a, b) => +new Date(b.last) - +new Date(a.last));
+}

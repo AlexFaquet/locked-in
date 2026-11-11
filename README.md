@@ -55,8 +55,23 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
   until you tap *Got it*, including ones sent while the app was in the
   background or closed.
 - **Earn XP** — a point a minute. Levels get steeper (Level 2 at 2.5 hours,
-  Level 5 at 40, Level 10 at 202.5). Tap a rank on any profile to see the
+  Level 5 at 40, Level 10 at 202.5). Tap a level on any profile to see the
   whole ladder and how far up it someone is. Streaks count days with 30+ minutes.
+- **Ranked.** Beside your level, which only climbs, is a tier that follows
+  how much you study now: Bronze, Silver, Gold, Platinum, Diamond, Master,
+  Titan, Mythic, set by your average hours a week over the last four weeks
+  (3, 6, 10, 15, 20, 27 and 35 hours; someone newer is averaged over the
+  weeks they've had). Study more and you're promoted; ease off and you drop;
+  four weeks of nothing and you're unranked. Your tier is the banner on your
+  profile and the emblem by your name, and the board has a *Ranked* race.
+  It's worked out from the daily minutes the board already has, so nothing
+  about it is stored.
+- **Coins and the shop.** Ten coins for every hour in your saved sessions.
+  Me → *Shop* spends them on an avatar frame, a name colour or a tag, which
+  your crew sees wherever you appear. *Send a gift* on a friend's profile
+  buys them a treat (☕ 🍪 🍕 ⚡️ 🌹 🏆), which stays on their profile, or
+  something to wear. A gift waits on screen like a hype. The database counts
+  the coins and checks every purchase; the app can't write any of it.
 - **Badges** — 41 of them, in eight groups: the grind (3, 5, 8 and 12 hours
   in one sitting, where a module switch doesn't break it), big days and
   weeks, hour milestones up to 1,000, streaks, odd hours (3am Club, Dawn
@@ -96,16 +111,21 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
   function's `LASTFM_KEY` secret.
 - **Crew chat.** The *Chat* tab is a group chat for each of your crews; only
   its members can read or post (the database checks), and it never shows on
-  a watch link. Messages arrive live, links are tappable, tapping one of
-  your own deletes it for everyone, and the tab counts what you haven't read
-  (per device). In more than one crew, switch at the top.
+  a watch link. Messages arrive live, links are tappable, and the tab counts
+  what you haven't read (per device). Tap a message to react to it (❤️ 🔥 😂
+  👏 💪 😮), see who has, or delete it if it's yours; tap a reaction under a
+  message to add yours or take it back. In more than one crew, each has its
+  own chat: switch at the top, which stays in reach as you scroll.
 - **Let someone watch.** Me → *Let someone watch* makes a link for family,
   or anyone without an account. It opens a read-only page with two tabs:
   *you* (studying now or not, with the clock and where; today, this week,
   your streak, activity and recent sessions) and *Board* (who's locked in
   right now, the board and the crew's recent sessions). Places show only for
   people who share them with the crew, and a timer waiting on *Still locked
-  in?* shows as not studying. Nobody can be tapped or pinged from it. The
+  in?* shows as not studying. Whoever's watching can cheer you on: one of
+  five emoji, with a short note if they like. It reaches you like a hype,
+  signed with the link's name, and only you, never the crew (one every ten
+  seconds, 200 a day per link). Nobody else can be tapped or pinged from it. The
   link is shown once (only a hash is kept), the page checks in every minute,
   and *Turn off* stops it straight away.
 - **St Andrews time, everywhere.** Every clock time, day, week and board
@@ -137,6 +157,12 @@ security:
 | `link_keys` | you (never the key itself) | you |
 | `messages` | members of that crew | you post in your crews' chats; you delete your own |
 | `watch_links` | you (never the link's secret) | you; whoever has a link sees your study and your crew's board, through `watch_stats` |
+| `reactions` | members of the message's crew | you add and take back your own |
+| `items` (bought and given) | whoever has it and whoever paid | only `shop_buy` |
+| `watch_cheers` | whoever they were sent to | only `watch_cheer`, with a watch link's secret |
+
+What people wear is in a private table, read through `crew_flair` (you and
+your crewmates) and written through `shop_wear`, which checks you have it.
 
 Pairing a device: `create_pairing_code()` stores a hash of a one-time code,
 and the `pair` edge function ([`supabase/functions/pair`](supabase/functions/pair/index.ts))
@@ -181,7 +207,7 @@ No build step. Serve the folder and open it:
 
 ```bash
 python3 -m http.server 8766
-node --test tests/*.test.mjs   # levels, streaks, badges, the board
+node --test tests/*.test.mjs   # levels, tiers, streaks, badges, the shop, the board
 ```
 
 `supabase/schema.sql` is what the project has now. It was applied in parts,

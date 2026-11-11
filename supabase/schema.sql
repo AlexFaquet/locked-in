@@ -965,7 +965,7 @@ grant execute on function public.create_watch_link(text) to authenticated;
 -- No account needed: the link's secret is the key. Places show only for people
 -- who share them with their crew (the same rule as everywhere), and a timer
 -- waiting on "Still locked in?" shows as not studying.
-create function public.watch_stats(p_token text, p_tz text default 'Europe/London')
+create or replace function public.watch_stats(p_token text, p_tz text default 'Europe/London')
 returns jsonb
 language plpgsql security definer set search_path = ''
 as $$
@@ -974,7 +974,7 @@ declare
   v_people uuid[];
   v_shown boolean;
 begin
-  select w.id, w.user_id, w.last_seen_at into v_link
+  select w.id, w.user_id, w.label, w.last_seen_at into v_link
   from public.watch_links w where w.token_hash = encode(sha256(convert_to(coalesce(p_token, ''), 'UTF8')), 'hex');
   if v_link.id is null then raise exception 'This link has been turned off. Ask for a new one.' using errcode = '28000'; end if;
   -- Pages check in every minute; a write every few minutes is plenty for "last looked".
@@ -996,6 +996,8 @@ begin
 
   return jsonb_build_object(
     'me', v_link.user_id,
+    -- Who the link was made for, so the page can say who a cheer is from.
+    'label', v_link.label,
     'people', (select coalesce(jsonb_agg(case when st.user_id = v_link.user_id and not v_shown
                                               then to_jsonb(st) || '{"live_subject": null, "live_started_at": null, "live_location": null}'::jsonb
                                               else to_jsonb(st) end), '[]'::jsonb)
@@ -1014,6 +1016,8 @@ begin
     -- Badges: the owner's and their crew's (for who has what).
     'badges', (select coalesce(jsonb_agg(jsonb_build_object('user_id', b.user_id, 'facts', b.facts)), '[]'::jsonb)
                from private.badge_records(v_link.user_id, p_tz) b),
+    -- What everyone's wearing, and the treats they've been given (see Coins and the shop).
+    'flair', (select coalesce(jsonb_agg(to_jsonb(f)), '[]'::jsonb) from private.flair_for(v_link.user_id) f),
     'sessions', coalesce((select jsonb_agg(jsonb_build_object('subject', s.subject, 'started_at', s.started_at, 'ended_at', s.ended_at, 'location', s.location) order by s.started_at desc)
                           from (select s.subject, s.started_at, s.ended_at, s.location from public.sessions s
                                 where s.user_id = v_link.user_id and s.started_at > now() - interval '70 days'
@@ -1502,3 +1506,279 @@ begin
 end $$;
 revoke execute on function public.study_group_with(uuid) from public, anon;
 grant execute on function public.study_group_with(uuid) to authenticated;
+
+/* ------------------------------------------------------------
+   Reactions in the crew chat: a heart (or one of a few others) on
+   a message. Whoever can read the message can react to it; you
+   take back only your own. They go when the message does.
+   ------------------------------------------------------------ */
+
+create table public.reactions (
+  message_id uuid not null references public.messages (id) on delete cascade,
+  user_id uuid not null default auth.uid() references public.profiles (id) on delete cascade,
+  -- Which one: REACTIONS in game.mjs turns it into its emoji.
+  kind text not null check (kind in ('heart', 'fire', 'laugh', 'clap', 'strong', 'wow')),
+  created_at timestamptz not null default now(),
+  primary key (message_id, user_id, kind)
+);
+create index reactions_user_id_idx on public.reactions (user_id);
+alter table public.reactions enable row level security;
+
+create policy "see reactions in your crews' chats" on public.reactions for select to authenticated
+  using (exists (select 1 from public.messages m where m.id = message_id and m.crew_id in (select private.my_crews())));
+create policy "react in your crews' chats" on public.reactions for insert to authenticated
+  with check (user_id = (select auth.uid())
+    and exists (select 1 from public.messages m where m.id = message_id and m.crew_id in (select private.my_crews())));
+create policy "take back your own reactions" on public.reactions for delete to authenticated
+  using (user_id = (select auth.uid()));
+
+revoke all on public.reactions from anon, authenticated;
+grant select, delete on public.reactions to authenticated;
+-- Who reacted and when are always the database's: you, now.
+grant insert (message_id, kind) on public.reactions to authenticated;
+
+-- They arrive live (RLS-checked). One taken back arrives as just its key.
+alter publication supabase_realtime add table public.reactions;
+
+/* ------------------------------------------------------------
+   Coins and the shop. You earn 10 coins for every hour in your
+   saved sessions, and spend them on things to wear (an avatar
+   frame, a name colour, a tag) or on gifts for a crewmate. Nothing
+   is stored as a balance: it's what your sessions have earned,
+   less what you've paid for, so it can't be set by hand. Prices
+   mirror SHOP in game.mjs (tests/shop.test.mjs checks they match).
+   Everything is bought through shop_buy; the app can't write here.
+   ------------------------------------------------------------ */
+
+create table private.shop_items (
+  id text primary key,
+  kind text not null check (kind in ('frame', 'color', 'tag', 'treat')),
+  price integer not null check (price > 0)
+);
+insert into private.shop_items (id, kind, price) values
+  ('ember', 'frame', 120),
+  ('frost', 'frame', 120),
+  ('neon', 'frame', 180),
+  ('royal', 'frame', 250),
+  ('prism', 'frame', 350),
+  ('coral', 'color', 60),
+  ('ocean', 'color', 60),
+  ('mint', 'color', 60),
+  ('grape', 'color', 60),
+  ('sunset', 'color', 150),
+  ('aurora', 'color', 200),
+  ('coffee-run', 'tag', 40),
+  ('night-shift', 'tag', 40),
+  ('bookworm', 'tag', 40),
+  ('zen', 'tag', 60),
+  ('built-different', 'tag', 80),
+  ('main-character', 'tag', 120),
+  ('coffee', 'treat', 10),
+  ('cookie', 'treat', 10),
+  ('pizza', 'treat', 20),
+  ('energy', 'treat', 20),
+  ('rose', 'treat', 30),
+  ('trophy', 'treat', 50);
+alter table private.shop_items enable row level security;
+revoke all on private.shop_items from public, anon, authenticated;
+
+-- What people have: bought for themselves, or given by a crewmate (paid_by is
+-- someone else, or nobody once the giver's account has gone). Something to
+-- wear is had once; a treat as often as it's given.
+create table public.items (
+  id bigint generated always as identity primary key,
+  user_id uuid not null references public.profiles (id) on delete cascade,
+  item text not null references private.shop_items (id),
+  kind text not null,
+  paid_by uuid references public.profiles (id) on delete set null,
+  price integer not null check (price >= 0),
+  created_at timestamptz not null default now()
+);
+create unique index items_one_each_idx on public.items (user_id, item) where kind <> 'treat';
+create index items_user_id_idx on public.items (user_id);
+create index items_paid_by_idx on public.items (paid_by);
+alter table public.items enable row level security;
+
+create policy "see what you have and what you gave" on public.items for select to authenticated
+  using (user_id = (select auth.uid()) or paid_by = (select auth.uid()));
+
+revoke all on public.items from anon, authenticated;
+grant select on public.items to authenticated;
+-- A gift arrives live, to the person it's for.
+alter publication supabase_realtime add table public.items;
+
+-- What each person is wearing. Read through crew_flair; written through shop_wear.
+create table private.loadouts (
+  user_id uuid primary key references public.profiles (id) on delete cascade,
+  frame text references private.shop_items (id),
+  color text references private.shop_items (id),
+  tag text references private.shop_items (id),
+  updated_at timestamptz not null default now()
+);
+alter table private.loadouts enable row level security;
+revoke all on private.loadouts from public, anon, authenticated;
+
+create function private.coins_of(p_user uuid)
+returns integer
+language sql stable security definer set search_path = ''
+as $$
+  select (coalesce((select floor(sum(extract(epoch from s.ended_at - s.started_at)) / 360) from public.sessions s where s.user_id = p_user), 0)
+        - coalesce((select sum(i.price) from public.items i where i.paid_by = p_user), 0))::integer
+$$;
+revoke execute on function private.coins_of(uuid) from public, anon, authenticated;
+
+-- Buys something for yourself, or for a crewmate (p_for). Returns the coins you have left.
+create function public.shop_buy(p_item text, p_for uuid default null)
+returns jsonb
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_user uuid := (select auth.uid());
+  v_to uuid := coalesce(p_for, (select auth.uid()));
+  v_item private.shop_items;
+  v_coins integer;
+begin
+  if v_user is null then raise exception 'Sign in first.' using errcode = '42501'; end if;
+  -- One purchase at a time per person, so two at once can't both spend the same coins.
+  perform 1 from public.profiles p where p.id = v_user for update;
+  if not found then raise exception 'Make your profile first.' using errcode = '42501'; end if;
+  select * into v_item from private.shop_items s where s.id = p_item;
+  if v_item.id is null then raise exception 'That isn''t in the shop.' using errcode = 'P0002'; end if;
+  if v_to <> v_user and not private.shares_crew(v_to) then
+    raise exception 'You can only send a gift to someone in your crew.' using errcode = '42501';
+  end if;
+  if v_item.kind = 'treat' and v_to = v_user then
+    raise exception 'Treats are for giving. Send one to a friend.' using errcode = '22023';
+  end if;
+  if v_item.kind <> 'treat' and exists (select 1 from public.items i where i.user_id = v_to and i.item = v_item.id) then
+    raise exception '%', case when v_to = v_user then 'You already have that.' else 'They already have that one.' end using errcode = '22023';
+  end if;
+  v_coins := private.coins_of(v_user);
+  if v_coins < v_item.price then
+    raise exception 'Not enough coins: that''s % and you have %.', v_item.price, greatest(v_coins, 0) using errcode = '22023';
+  end if;
+  insert into public.items (user_id, item, kind, paid_by, price) values (v_to, v_item.id, v_item.kind, v_user, v_item.price);
+  return jsonb_build_object('coins', v_coins - v_item.price);
+end $$;
+revoke execute on function public.shop_buy(text, uuid) from public, anon;
+grant execute on function public.shop_buy(text, uuid) to authenticated;
+
+-- Puts on something you have (a frame, a colour or a tag), or takes that slot off (p_item null).
+create function public.shop_wear(p_slot text, p_item text default null)
+returns void
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_user uuid := (select auth.uid());
+begin
+  if v_user is null then raise exception 'Sign in first.' using errcode = '42501'; end if;
+  if p_slot is null or p_slot not in ('frame', 'color', 'tag') then raise exception 'There''s no such slot.' using errcode = '22023'; end if;
+  if p_item is not null and not exists (select 1 from public.items i where i.user_id = v_user and i.item = p_item and i.kind = p_slot) then
+    raise exception 'You don''t have that yet.' using errcode = '22023';
+  end if;
+  insert into private.loadouts (user_id) values (v_user) on conflict do nothing;
+  update private.loadouts l
+  set frame = case when p_slot = 'frame' then p_item else l.frame end,
+      color = case when p_slot = 'color' then p_item else l.color end,
+      tag = case when p_slot = 'tag' then p_item else l.tag end,
+      updated_at = now()
+  where l.user_id = v_user;
+end $$;
+revoke execute on function public.shop_wear(text, text) from public, anon;
+grant execute on function public.shop_wear(text, text) to authenticated;
+
+-- For the app: your coins and what you have to wear. Only ever your own.
+create function public.my_wallet()
+returns jsonb
+language sql stable security definer set search_path = ''
+as $$
+  select jsonb_build_object(
+    'coins', private.coins_of((select auth.uid())),
+    'owned', coalesce((select jsonb_agg(i.item order by i.id) from public.items i where i.user_id = (select auth.uid()) and i.kind <> 'treat'), '[]'::jsonb))
+  where (select auth.uid()) is not null
+$$;
+revoke execute on function public.my_wallet() from public, anon;
+grant execute on function public.my_wallet() to authenticated;
+
+-- What a person and their crewmates are wearing, and the treats each has been given.
+create function private.flair_for(p_user uuid)
+returns table (user_id uuid, frame text, color text, tag text, treats jsonb)
+language sql stable security definer set search_path = ''
+as $$
+  with people as (
+    select p_user as id
+    union
+    select theirs.user_id from public.crew_members mine
+    join public.crew_members theirs on theirs.crew_id = mine.crew_id
+    where mine.user_id = p_user
+  )
+  select pe.id, l.frame, l.color, l.tag,
+         coalesce((select jsonb_object_agg(t.item, t.n)
+                   from (select i.item, count(*) as n from public.items i where i.user_id = pe.id and i.kind = 'treat' group by i.item) t), '{}'::jsonb)
+  from people pe
+  left join private.loadouts l on l.user_id = pe.id
+$$;
+revoke execute on function private.flair_for(uuid) from public, anon, authenticated;
+
+-- For the app: yours and your crewmates'.
+create function public.crew_flair()
+returns table (user_id uuid, frame text, color text, tag text, treats jsonb)
+language sql stable security definer set search_path = ''
+as $$
+  select * from private.flair_for((select auth.uid())) where (select auth.uid()) is not null
+$$;
+revoke execute on function public.crew_flair() from public, anon;
+grant execute on function public.crew_flair() to authenticated;
+
+/* ------------------------------------------------------------
+   Cheers from a watch link: whoever has the link can send its
+   owner one of a few emoji, with a short note if they like. Only
+   to the owner, never the crew. The link's secret is the key, as
+   in watch_stats; a cheer outlives its link being turned off.
+   ------------------------------------------------------------ */
+
+create table public.watch_cheers (
+  id bigint generated always as identity primary key,
+  link_id uuid references public.watch_links (id) on delete set null,
+  user_id uuid not null references public.profiles (id) on delete cascade,
+  -- The link's label when it was sent ("Mum and Dad").
+  from_label text not null,
+  -- Which one: CHEERS in game.mjs turns it into its emoji.
+  kind text not null check (kind in ('heart', 'clap', 'strong', 'fire', 'star')),
+  note text check (char_length(note) between 1 and 140),
+  created_at timestamptz not null default now()
+);
+create index watch_cheers_user_id_idx on public.watch_cheers (user_id, id desc);
+create index watch_cheers_link_id_idx on public.watch_cheers (link_id, created_at desc);
+alter table public.watch_cheers enable row level security;
+
+create policy "see cheers sent to you" on public.watch_cheers for select to authenticated
+  using (user_id = (select auth.uid()));
+
+revoke all on public.watch_cheers from anon, authenticated;
+grant select on public.watch_cheers to authenticated;
+alter publication supabase_realtime add table public.watch_cheers;
+
+create function public.watch_cheer(p_token text, p_kind text, p_note text default null)
+returns void
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_link record;
+begin
+  select w.id, w.user_id, w.label into v_link
+  from public.watch_links w where w.token_hash = encode(sha256(convert_to(coalesce(p_token, ''), 'UTF8')), 'hex');
+  if v_link.id is null then raise exception 'This link has been turned off. Ask for a new one.' using errcode = '28000'; end if;
+  if p_kind is null or p_kind not in ('heart', 'clap', 'strong', 'fire', 'star') then raise exception 'Pick one of the cheers.' using errcode = '22023'; end if;
+  -- A link can't be used to flood someone: one every ten seconds, 200 a day.
+  if exists (select 1 from public.watch_cheers c where c.link_id = v_link.id and c.created_at > now() - interval '10 seconds') then
+    raise exception 'Easy — you just sent one.' using errcode = '22023';
+  end if;
+  if (select count(*) from public.watch_cheers c where c.link_id = v_link.id and c.created_at > now() - interval '1 day') >= 200 then
+    raise exception 'That''s plenty of cheering for one day.' using errcode = '22023';
+  end if;
+  insert into public.watch_cheers (link_id, user_id, from_label, kind, note)
+  values (v_link.id, v_link.user_id, v_link.label, p_kind, nullif(btrim(left(coalesce(p_note, ''), 140)), ''));
+end $$;
+revoke execute on function public.watch_cheer(text, text, text) from public;
+grant execute on function public.watch_cheer(text, text, text) to anon, authenticated;
