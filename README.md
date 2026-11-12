@@ -59,10 +59,10 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
   whole ladder and how far up it someone is. Streaks count days with 30+ minutes.
 - **Ranked.** Beside your level, which only climbs, is a tier that follows
   how much you study now: Bronze, Silver, Gold, Platinum, Diamond, Master,
-  Titan, Mythic, set by your average hours a week over the last two weeks
+  Titan, Mythic, set by your average hours a week over the last four weeks
   (3, 6, 10, 15, 20, 27 and 35 hours; someone newer is averaged over the
   weeks they've had). Study more and you're promoted; ease off and you drop;
-  two weeks of nothing and you're unranked. Your tier is the banner on your
+  four weeks of nothing and you're unranked. Your tier is the banner on your
   profile and the emblem by your name, and the board has a *Ranked* race.
   It's worked out from the daily minutes the board already has, so nothing
   about it is stored.
