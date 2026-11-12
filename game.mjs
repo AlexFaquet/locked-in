@@ -323,10 +323,11 @@ export function ago(iso, now = new Date()) {
 export const encodeLinkCode = ({ url, key, link }) => btoa(JSON.stringify({ u: url, k: key, l: link })).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
 /* Ranked. Beside your level (which only ever climbs) sits a tier that follows
-   how much you study now: your average hours a week over the last four weeks.
+   how much you study now: your average hours a week over the last two weeks.
    Study more and you're promoted; ease off and you drop. Someone who started
-   under four weeks ago is averaged over the weeks they've had. */
-export const RANKED_WEEKS = 4;
+   under two weeks ago is averaged over the weeks they've had. Two weeks, so a
+   tier keeps up with a 12-week semester. */
+export const RANKED_WEEKS = 2;
 export const TIERS = [
   ["bronze", "Bronze", 0], ["silver", "Silver", 3], ["gold", "Gold", 6], ["platinum", "Platinum", 10],
   ["diamond", "Diamond", 15], ["master", "Master", 20], ["titan", "Titan", 27], ["mythic", "Mythic", 35],
