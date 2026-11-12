@@ -37,11 +37,20 @@ test("ease off and you drop; stop for four weeks and you're unranked", () => {
 test("someone new is averaged over the weeks they've had", () => {
   // Five hours on their first day is a 5h week, not a quarter of one.
   const fresh = rankedFor(run(300, 1), now);
-  assert.deepEqual([fresh.tier.name, fresh.weeks], ["Silver", 1]);
-  assert.equal(rankedFor(run(60, 8), now).weeks, 2);
-  assert.equal(rankedFor(run(60, 22), now).weeks, 4);
+  assert.deepEqual([fresh.tier.name, fresh.weeks, fresh.days], ["Silver", 1, 7]);
+  assert.equal(rankedFor(run(60, 8), now).days, 8);
+  assert.equal(rankedFor(run(60, 22), now).days, 22);
+  assert.equal(rankedFor(run(60, 40), now).weeks, 4);
   // Tomorrow's date (a clock ahead of St Andrews) doesn't count.
   assert.equal(rankedFor({ [ukDay(dayStart(now, 1))]: 600 }, now).tier, null);
+});
+
+test("a few days' head start doesn't cost a whole week", () => {
+  // 80h over 22 days beats 60h over 18: partial weeks used to round up, putting the first behind.
+  const longer = rankedFor(run(80 * 60 / 22, 22), now);
+  const shorter = rankedFor(run(60 * 60 / 18, 18), now);
+  assert.ok(longer.average > shorter.average);
+  assert.ok(longer.tier.index >= shorter.tier.index);
 });
 
 test("a change of tier is a promotion or a drop", () => {

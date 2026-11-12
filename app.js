@@ -1605,7 +1605,7 @@ function rankedSheet(person) {
     if (current) here = node;
     return node;
   };
-  const over = r.weeks < RANKED_WEEKS ? (r.weeks === 1 ? "in the first week" : `over the first ${r.weeks} weeks`) : `over the last ${RANKED_WEEKS} weeks`;
+  const over = r.weeks < RANKED_WEEKS ? (r.days === 7 ? "in the first week" : `over the first ${r.days} days`) : `over the last ${RANKED_WEEKS} weeks`;
   const summary = r.tier
     ? `${you ? "You're" : `${person.name} is`} averaging ${weekHours(r.average)} a week ${over}.`
     : `${you ? "You haven't" : `${person.name} hasn't`} studied in the last ${RANKED_WEEKS} weeks. One session gets ${you ? "you" : "them"} placed.`;

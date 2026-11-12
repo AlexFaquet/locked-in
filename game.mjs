@@ -325,7 +325,9 @@ export const encodeLinkCode = ({ url, key, link }) => btoa(JSON.stringify({ u: u
 /* Ranked. Beside your level (which only ever climbs) sits a tier that follows
    how much you study now: your average hours a week over the last four weeks.
    Study more and you're promoted; ease off and you drop. Someone who started
-   under four weeks ago is averaged over the weeks they've had. */
+   under four weeks ago is averaged over the days they've had (at least a
+   week's worth), not rounded up to whole weeks: rounding made a few days'
+   head start cost a whole extra week of average. */
 export const RANKED_WEEKS = 4;
 export const TIERS = [
   ["bronze", "Bronze", 0], ["silver", "Silver", 3], ["gold", "Gold", 6], ["platinum", "Platinum", 10],
@@ -345,13 +347,14 @@ export function rankedFor(days = {}, now = new Date()) {
     if (first === null || day < first) first = day;
     if (day > today - RANKED_WEEKS * 7) total += minutes;
   }
-  const weeks = first === null ? 1 : Math.min(RANKED_WEEKS, Math.max(1, Math.ceil((today - first + 1) / 7)));
+  const span = first === null ? 7 : Math.min(RANKED_WEEKS * 7, Math.max(7, today - first + 1));
+  const weeks = span / 7;
   const average = total / weeks;
   const tier = total ? TIERS.findLast((t) => average >= t.minutes) : null;
   const next = tier ? TIERS[tier.index + 1] || null : TIERS[0];
   const from = tier ? tier.minutes : 0;
   return {
-    tier, next, weeks, total, average,
+    tier, next, days: span, weeks, total, average,
     toNext: !tier ? 1 : next ? Math.max(1, Math.ceil(next.minutes * weeks - total)) : 0,
     ratio: tier && next ? Math.min(1, (average - from) / (next.minutes - from)) : tier ? 1 : 0,
   };

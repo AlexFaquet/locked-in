@@ -61,7 +61,7 @@ Share → *Add to Home Screen* so it opens like an app and keeps your account.
   how much you study now: Bronze, Silver, Gold, Platinum, Diamond, Master,
   Titan, Mythic, set by your average hours a week over the last four weeks
   (3, 6, 10, 15, 20, 27 and 35 hours; someone newer is averaged over the
-  weeks they've had). Study more and you're promoted; ease off and you drop;
+  days they've had, counting at least a week). Study more and you're promoted; ease off and you drop;
   four weeks of nothing and you're unranked. Your tier is the banner on your
   profile and the emblem by your name, and the board has a *Ranked* race.
   It's worked out from the daily minutes the board already has, so nothing
