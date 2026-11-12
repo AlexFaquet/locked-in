@@ -207,7 +207,15 @@ No build step. Serve the folder and open it:
 
 ```bash
 python3 -m http.server 8766
-node --test tests/*.test.mjs   # levels, tiers, streaks, badges, the shop, the board
+```
+
+The tests need a couple of dev tools (nothing the app itself uses):
+
+```bash
+npm install && npx playwright install chromium   # once
+npm test                # levels, tiers, streaks, badges, the shop, the board,
+                        # and the whole schema in a local Postgres (PGlite)
+npm run test:browser    # every screen, light and dark, with made-up data
 ```
 
 `supabase/schema.sql` is what the project has now. It was applied in parts,

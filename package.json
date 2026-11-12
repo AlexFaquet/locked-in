@@ -1,0 +1,13 @@
+{
+  "name": "locked-in",
+  "private": true,
+  "description": "No build step: the app is the static files in this folder. These are only for the tests.",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "test:browser": "node tests/browser/screens.mjs"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.16",
+    "playwright": "1.62.1"
+  }
+}
