@@ -505,8 +505,8 @@ html.chatting .app { padding-bottom: max(calc(186px + env(safe-area-inset-bottom
 .split-bar + .module-row { border-top: 0; }
 
 /* ---------- ranked: tiers ----------
-   Each tier has two colours and an ink that reads on them. The emblem
-   is a small shield; the profile banner is the same colours, wide. */
+   Each tier has two colours and an ink that reads on them, for the
+   profile banner. The emblem is the tier's badge, from tiers/. */
 [data-tier="none"] { --t1: #dcd7e8; --t2: #aaa4be; --t-ink: #2a2740; --t-chip: rgba(255, 255, 255, .4); }
 [data-tier="bronze"] { --t1: #f3bf92; --t2: #b56a2e; --t-ink: #2e1803; --t-chip: rgba(255, 255, 255, .4); }
 [data-tier="silver"] { --t1: #f1f4f9; --t2: #98a2b8; --t-ink: #24283a; --t-chip: rgba(255, 255, 255, .5); }
@@ -517,12 +517,18 @@ html.chatting .app { padding-bottom: max(calc(186px + env(safe-area-inset-bottom
 [data-tier="titan"] { --t1: #ff8f7c; --t2: #c9123b; --t-ink: #fff; --t-chip: rgba(0, 0, 0, .22); }
 [data-tier="mythic"] { --t1: #ff7ac3; --t2: #5b3dff; --t-ink: #fff; --t-chip: rgba(0, 0, 0, .22); }
 
-.gem { position: relative; display: inline-block; flex: none; width: 15px; height: 17px; vertical-align: -3px; background: linear-gradient(150deg, var(--t1), var(--t2)); clip-path: polygon(50% 0, 100% 24%, 100% 64%, 50% 100%, 0 64%, 0 24%); }
-/* A facet catching the light. */
-.gem::after { content: ''; position: absolute; inset: 0; background: rgba(255, 255, 255, .6); clip-path: polygon(50% 12%, 84% 29%, 50% 46%, 16% 29%); }
-.gem[data-tier="mythic"] { background: conic-gradient(from 200deg, #ffd76a, #ff7ac3, #7b6dff, #35d6c4, #ffd76a); }
-.gem[data-tier="none"] { opacity: .7; }
-.gem-big { width: 28px; height: 32px; vertical-align: middle; }
+.gem { display: inline-block; flex: none; width: 20px; height: 20px; vertical-align: -5px; background: center / contain no-repeat; }
+.gem[data-tier="bronze"] { background-image: url(tiers/bronze.webp); }
+.gem[data-tier="silver"] { background-image: url(tiers/silver.webp); }
+.gem[data-tier="gold"] { background-image: url(tiers/gold.webp); }
+.gem[data-tier="platinum"] { background-image: url(tiers/platinum.webp); }
+.gem[data-tier="diamond"] { background-image: url(tiers/diamond.webp); }
+.gem[data-tier="master"] { background-image: url(tiers/master.webp); }
+.gem[data-tier="titan"] { background-image: url(tiers/titan.webp); }
+.gem[data-tier="mythic"] { background-image: url(tiers/mythic.webp); }
+/* Unranked: Bronze's badge, greyed out, as on the tiers still ahead. */
+.gem[data-tier="none"] { background-image: url(tiers/bronze.webp); filter: grayscale(1); opacity: .5; }
+.gem-big { width: 34px; height: 34px; vertical-align: middle; }
 .is-ahead .rung-icon .gem { filter: grayscale(1); opacity: .5; }
 .pill-tier { position: relative; padding: 6px 10px; cursor: pointer; }
 .pill-tier::after { content: ''; position: absolute; inset: -6px -4px; }
@@ -537,7 +543,7 @@ html.chatting .app { padding-bottom: max(calc(186px + env(safe-area-inset-bottom
 @keyframes sheen { 0%, 60% { transform: translateX(0); } 100% { transform: translateX(520%); } }
 .hero-banner > span { position: relative; z-index: 1; }
 .hero-banner-tier { display: inline-flex; align-items: center; gap: 8px; font-size: 18px; letter-spacing: .07em; text-transform: uppercase; }
-.hero-banner-tier .gem { filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 1px #fff) drop-shadow(0 2px 0 rgba(0, 0, 0, .18)); }
+.hero-banner-tier .gem { width: 40px; height: 40px; filter: drop-shadow(0 2px 2px rgba(0, 0, 0, .25)); }
 .hero-banner-rate { padding: 4px 10px; border-radius: 999px; background: var(--t-chip); white-space: nowrap; }
 .hero .avatar-big { margin-top: -46px; z-index: 1; box-shadow: 0 0 0 5px var(--card); }
 .hero h2 { width: fit-content; max-width: 100%; margin-inline: auto; overflow-wrap: anywhere; }
